@@ -1,0 +1,6 @@
+httpx>=0.27
+python-telegram-bot[job-queue]>=21.0
+python-dotenv>=1.0
+schedule>=1.2
+tzdata>=2024.1  # база часовых поясов IANA для zoneinfo (нужна на Windows)
+playwright>=1.44  # headless-браузер для парсинга Aviasales (после install: playwright install chromium)

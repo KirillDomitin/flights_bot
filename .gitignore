@@ -1,0 +1,15 @@
+# Секреты и локальные данные
+.env
+prices.db
+monitor.log
+
+# Внутренние инструкции для Claude — не публикуем
+CLAUDE.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
