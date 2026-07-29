@@ -15,7 +15,8 @@
 1. **Автопроверка дважды в день** — в 09:00 и 21:00 (МСК) проверяет цены и, если
    цена снизилась, шлёт уведомление в группу.
 2. **Команда `/check`** — по запросу проверяет цены прямо сейчас и публикует их в группу.
-3. **История цен** — все проверки пишутся в SQLite (`prices.db`).
+3. **Команда `/chart`** — присылает график изменения цены по накопленной истории.
+4. **История цен** — все проверки пишутся в SQLite (`prices.db`).
 
 ## Быстрый старт
 
@@ -42,6 +43,13 @@ python monitor.py --bot
 ```
 Бот пришлёт текущие цены по обоим маршрутам.
 
+Для графика истории цен:
+```
+/chart@ИмяБота
+```
+Бот пришлёт картинкой график изменения цены по обоим маршрутам. График строится
+по данным из `prices.db`, поэтому чем дольше работает мониторинг, тем нагляднее.
+
 > `@ИмяБота` обязателен из-за privacy mode. Чтобы работало короткое `/check`,
 > отключи privacy у бота в @BotFather (`/setprivacy` → Disable) и заново добавь
 > бота в группу.
@@ -57,7 +65,11 @@ python monitor.py --bot
 | `python monitor.py` | Только планировщик (09:00/21:00), без бота |
 | `python monitor.py --now` | Разовая проверка прямо сейчас |
 | `python monitor.py --history` | Показать историю цен из БД |
-| `python get_chat_id.py` | Узнать chat_id для `TELEGRAM_CHAT_ID` |
+| `python monitor.py --chart [файл]` | Построить график цен из БД в PNG (по умолч. `price_chart.png`) |
+| `python tools/get_chat_id.py` | Узнать chat_id для `TELEGRAM_CHAT_ID` |
+
+> Можно запускать и как пакет: `python -m flight_monitor --bot` (эквивалентно
+> `python monitor.py --bot`; `monitor.py` — тонкий shim для совместимости).
 
 ## Конфигурация (.env)
 
@@ -67,40 +79,56 @@ TELEGRAM_CHAT_ID=...           # id чата/группы (python get_chat_id.py
 PRICE_SOURCE=browser           # browser (парсинг Aviasales) | api (кэш Travelpayouts)
 MONITOR_HEADLESS=true          # false — показать окно браузера (отладка)
 TRAVELPAYOUTS_TOKEN=...        # нужен только при PRICE_SOURCE=api
+REDIS_URL=                     # кэш цен; в Docker задаётся автоматически, локально пусто = кэш выкл.
+CACHE_TTL_SECONDS=900          # время жизни кэша (15 мин)
 ```
 
-## Автозапуск при старте Windows
+**Кэш цен.** Повторный `/check` в течение 15 минут отдаётся из Redis мгновенно,
+без повторного парсинга (~20–40 сек/маршрут). Плановые проверки 09:00/21:00 всегда
+берут свежую цену и перезаписывают кэш. Redis недоступен → бот просто делает
+прямой запрос (кэш никогда не роняет работу).
 
-В комплекте лаунчер `run_bot.bat` — запускает бота из venv **без окна** (pythonw),
-логи пишет в `monitor.log`.
+## Запуск в Docker (рекомендуется)
 
-**Настроено:** ярлык `FlightMonitorBot.lnk` в папке «Автозагрузка», поэтому бот
-стартует при каждом входе в Windows (прав администратора не требует).
+Бот работает в контейнере: браузер Playwright и все зависимости уже в образе,
+БД `prices.db` хранится в именованном томе и переживает пересборку. Рядом
+поднимается контейнер `redis` — кэш цен (эфемерный, том не нужен).
+`restart: unless-stopped` сам поднимает сервисы после перезагрузки и падений —
+поэтому автозапуск через «Автозагрузку» Windows больше не нужен.
 
-```powershell
-# Папка автозагрузки (там лежит ярлык)
-explorer shell:startup
+**Требуется:** установленный и запущенный Docker Desktop, заполненный `.env`.
 
-# Запустить бота сейчас, не дожидаясь перезагрузки
-Start-Process 'G:\flight-monitor\run_bot.bat'
+```bash
+# Собрать образ и запустить в фоне
+docker compose up -d --build
 
-# Проверить, что бот работает
-Get-Process pythonw -ErrorAction SilentlyContinue
+# Логи (Ctrl+C — выйти из просмотра, контейнер продолжит работать)
+docker compose logs -f
 
-# Остановить бота
-Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force
+# Остановить
+docker compose down
 
-# Отключить автозапуск — удалить ярлык
-Remove-Item "$([Environment]::GetFolderPath('Startup'))\FlightMonitorBot.lnk"
+# Остановить и удалить историю цен (том с БД)
+docker compose down -v
 ```
 
 > ⚠️ **Только один экземпляр.** Telegram разрешает боту один поток `getUpdates`.
-> Если включён автозапуск — **не запускай** одновременно `python monitor.py --bot`
-> вручную, иначе получишь ошибку `Conflict: terminated by other getUpdates request`.
+> Пока запущен контейнер — **не запускай** параллельно `python monitor.py --bot`
+> вручную, иначе получишь `Conflict: terminated by other getUpdates request`.
 
-**Альтернатива с админ-правами** — задача в Планировщике (запуск даже до входа):
+Разовые команды внутри контейнера (например, построить график в файл):
+```bash
+docker compose run --rm bot python monitor.py --chart /app/data/price_chart.png
+docker compose run --rm bot python monitor.py --history
+```
+
+### Локальный запуск без Docker
+
+Лаунчер `run_bot.bat` по-прежнему запускает бота из venv (`.venv`) без окна:
 ```powershell
-schtasks /create /tn "FlightMonitorBot" /tr "G:\flight-monitor\run_bot.bat" /sc onlogon /rl highest /f
+Start-Process 'G:\flight-monitor\run_bot.bat'                 # запустить
+Get-Process pythonw -ErrorAction SilentlyContinue              # проверить
+Get-Process pythonw -ErrorAction SilentlyContinue | Stop-Process -Force  # остановить
 ```
 
 ## Тесты
@@ -111,15 +139,29 @@ python -m unittest -v
 
 ## Структура
 
-| Файл | Назначение |
-|------|-----------|
-| `monitor.py` | Точка входа: бот, планировщик, CLI, выбор источника цен |
-| `browser_client.py` | Парсинг Aviasales через Playwright (основной источник) |
-| `api_client.py` | Travelpayouts Data API (запасной источник) |
-| `notifier.py` | Telegram-уведомления и форматирование |
-| `storage.py` | Хранение истории в SQLite |
-| `get_chat_id.py` | Утилита определения chat_id |
-| `test_monitor.py` | Мок-тесты логики сравнения цен |
+Проект собран в пакет `flight_monitor/` со слоями: **core** — логика,
+**sources** — провайдеры цен, **repository** — хранилища, **bot** — Telegram.
+
+```
+monitor.py                      # тонкий shim → flight_monitor.cli.main()
+flight_monitor/
+├── cli.py                      # разбор аргументов, запуск режима
+├── config.py                  # load_config, ROUTES, константы, логирование
+├── notifier.py                # форматирование сообщений + отправка в Telegram
+├── chart.py                   # график истории цен (matplotlib)
+├── core/monitoring.py         # fetch_price (кэш), check_route, проверки, scheduler
+├── sources/
+│   ├── api.py                 # Travelpayouts Data API (запасной источник)
+│   └── browser.py             # парсинг Aviasales через Playwright (основной)
+├── repository/
+│   ├── storage.py             # история цен в SQLite
+│   └── cache.py               # кэш запросов (Redis/in-memory за интерфейсом Cache)
+└── bot/
+    ├── app.py                 # сборка/запуск бота (polling + JobQueue)
+    └── handlers.py            # /start /check /chart, плановая джоба
+tests/test_monitoring.py        # мок-тесты логики и кэша
+tools/get_chat_id.py            # утилита определения chat_id
+```
 
 ## Ограничения
 

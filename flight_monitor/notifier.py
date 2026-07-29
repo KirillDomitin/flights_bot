@@ -46,19 +46,30 @@ def format_date_ru(depart_date: str) -> str:
     return f"{dt.day} {_MONTHS_RU[dt.month]} {dt.year}"
 
 
+def route_label(origin: str, destination: str) -> str:
+    """'MOW', 'PEK' -> 'MOW → PEK'."""
+    return f"{origin} → {destination}"
+
+
+def _format_price(price: int, currency: str | None) -> str:
+    """42100, 'rub' -> '42 100 ₽' (для не-rub — код валюты вместо символа)."""
+    symbol = "₽" if (currency or "rub").lower() == "rub" else (currency or "")
+    return f"{price:,} {symbol}".replace(",", " ").strip()
+
+
 def build_message(record: dict, previous: dict | None) -> str:
     """Собрать текст уведомления о новой цене."""
     price = record["price"]
-    currency = "₽" if (record.get("currency", "rub").lower() == "rub") else record.get("currency", "")
+    currency = record.get("currency")
 
-    price_line = f"💰 {price:,} {currency}".replace(",", " ")
+    price_line = f"💰 {_format_price(price, currency)}"
     if previous:
         old = previous["price"]
         diff_pct = round((price - old) / old * 100) if old else 0
-        price_line += f" (было: {old:,} {currency}".replace(",", " ") + f", {diff_pct:+d}%)"
+        price_line += f" (было: {_format_price(old, currency)}, {diff_pct:+d}%)"
 
     lines = [
-        f"✈️ Новая цена: {record['origin']} → {record['destination']}",
+        f"✈️ Новая цена: {route_label(record['origin'], record['destination'])}",
         f"📅 {format_date_ru(record['depart_date'])}",
         price_line,
         f"🏢 {airline_name(record.get('airline'))}",
@@ -72,16 +83,14 @@ def build_status_line(route: dict, record: dict | None) -> str:
     """Блок с текущей ценой по одному маршруту (для команды /check)."""
     if record is None:
         return (
-            f"✈️ {route['origin']} → {route['destination']}\n"
+            f"✈️ {route_label(route['origin'], route['destination'])}\n"
             f"📅 {format_date_ru(route['depart_date'])}\n"
             f"❌ нет предложений"
         )
-    currency = "₽" if record.get("currency", "rub").lower() == "rub" else record.get("currency", "")
-    price = f"{record['price']:,}".replace(",", " ")
     lines = [
-        f"✈️ {record['origin']} → {record['destination']}",
+        f"✈️ {route_label(record['origin'], record['destination'])}",
         f"📅 {format_date_ru(record['depart_date'])}",
-        f"💰 {price} {currency}",
+        f"💰 {_format_price(record['price'], record.get('currency'))}",
         f"🏢 {airline_name(record.get('airline'))}",
     ]
     if record.get("link"):

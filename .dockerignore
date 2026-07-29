@@ -1,0 +1,25 @@
+# Секреты и локальные данные — в образ не попадают
+.env
+prices.db
+*.log
+
+# Виртуальное окружение и кэши Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Git и внутренние инструкции
+.git/
+.gitignore
+CLAUDE.md
+
+# Артефакты
+*.png
+run_bot.bat
+
+# Не нужны в образе
+tests/
+tools/
+.idea/

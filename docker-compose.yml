@@ -1,0 +1,29 @@
+services:
+  bot:
+    build: .
+    image: flight-monitor:latest
+    container_name: flight-monitor-bot
+    # Перезапуск при падении и при старте Docker (замена автозагрузки Windows)
+    restart: unless-stopped
+    # Токены и настройки берём из .env (в образ не попадают)
+    env_file: .env
+    environment:
+      # БД в именованном томе — переживает пересборку образа
+      MONITOR_DB_PATH: /app/data/prices.db
+      TZ: Europe/Moscow
+      # Кэш результатов запроса цены (15 мин). Хост redis — имя сервиса ниже.
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL_SECONDS: "900"
+    depends_on:
+      - redis
+    volumes:
+      - prices-data:/app/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: flight-monitor-redis
+    restart: unless-stopped
+    # Кэш эфемерный (TTL 15 мин) — том не нужен, потеря при рестарте некритична.
+
+volumes:
+  prices-data:

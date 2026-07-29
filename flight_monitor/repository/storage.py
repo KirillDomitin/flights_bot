@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).with_name("prices.db")
+# По умолчанию БД лежит в корне репозитория (рядом с monitor.py). Модуль теперь
+# в flight_monitor/repository/, поэтому корень — на два уровня выше.
+# Путь можно переопределить через MONITOR_DB_PATH (в Docker — том вне образа).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DB_PATH = Path(os.getenv("MONITOR_DB_PATH") or _REPO_ROOT / "prices.db")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS prices (
@@ -30,11 +36,28 @@ CREATE INDEX IF NOT EXISTS idx_route
 
 def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
     """Открыть соединение с БД и убедиться, что схема создана."""
+    db_path = Path(db_path)
+    if db_path.parent and not db_path.parent.exists():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     conn.commit()
     return conn
+
+
+@contextmanager
+def connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
+    """Контекстный менеджер: открыть соединение и гарантированно его закрыть.
+
+    Соединение SQLite нужно создавать и использовать в одном потоке, поэтому
+    в фоновых задачах оборачиваем весь блок работы с БД в этот менеджер.
+    """
+    conn = get_connection(db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def get_last_price(
@@ -103,4 +126,25 @@ def get_history(
     query += " ORDER BY ts DESC, id DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_route_series(
+    conn: sqlite3.Connection,
+    origin: str,
+    destination: str,
+    depart_date: str,
+    limit: int = 200,
+) -> list[dict]:
+    """Вернуть историю цен по конкретному маршруту в хронологическом порядке
+    (по возрастанию времени) — для построения графика."""
+    rows = conn.execute(
+        """
+        SELECT * FROM prices
+        WHERE origin = ? AND destination = ? AND depart_date = ?
+        ORDER BY ts ASC, id ASC
+        LIMIT ?
+        """,
+        (origin, destination, depart_date, limit),
+    ).fetchall()
     return [dict(row) for row in rows]
