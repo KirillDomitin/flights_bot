@@ -120,11 +120,33 @@ class MessageFormatTests(unittest.TestCase):
 
     def test_current_report_lists_all_routes(self) -> None:
         report = notifier.build_current_report(
-            [(_ROUTE, _record(27829)), (_ROUTE, None)]
+            [(_ROUTE, _record(27829), None), (_ROUTE, None, None)]
         )
         self.assertIn("Текущие цены", report)
         self.assertIn("27 829 ₽", report)
         self.assertIn("нет предложений", report)
+
+    def test_status_line_shows_price_increase(self) -> None:
+        line = notifier.build_status_line(_ROUTE, _record(45000), {"price": 42100})
+        self.assertIn("🔺", line)
+        self.assertIn("+2 900", line)   # 45000 − 42100
+        self.assertIn("+7%", line)
+
+    def test_status_line_shows_price_drop(self) -> None:
+        line = notifier.build_status_line(_ROUTE, _record(38500), {"price": 42100})
+        self.assertIn("🔻", line)
+        self.assertIn("-3 600", line)   # 38500 − 42100
+        self.assertIn("-9%", line)
+
+    def test_status_line_no_change_marker(self) -> None:
+        line = notifier.build_status_line(_ROUTE, _record(42100), {"price": 42100})
+        self.assertIn("без изменений", line)
+
+    def test_status_line_no_previous_has_no_marker(self) -> None:
+        line = notifier.build_status_line(_ROUTE, _record(42100), None)
+        self.assertNotIn("🔺", line)
+        self.assertNotIn("🔻", line)
+        self.assertNotIn("без изменений", line)
 
 
 class CacheTests(unittest.TestCase):

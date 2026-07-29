@@ -57,6 +57,26 @@ def _format_price(price: int, currency: str | None) -> str:
     return f"{price:,} {symbol}".replace(",", " ").strip()
 
 
+def _format_change(price: int, previous: dict | None, currency: str | None) -> str | None:
+    """Пометка изменения цены относительно прошлой записи в истории.
+
+    Возвращает, например, '🔺 +7 582 ₽, +14%' (подорожало) или
+    '🔻 -2 012 ₽, -7%' (подешевело), 'без изменений' при равенстве цен, либо
+    None — если сравнивать не с чем (первая проверка маршрута).
+    """
+    if not previous:
+        return None
+    old = previous["price"]
+    diff = price - old
+    symbol = "₽" if (currency or "rub").lower() == "rub" else (currency or "")
+    if diff == 0:
+        return "без изменений"
+    pct = round(diff / old * 100) if old else 0
+    arrow = "🔺" if diff > 0 else "🔻"
+    amount = f"{diff:+,}".replace(",", " ")
+    return f"{arrow} {amount} {symbol}, {pct:+d}%".strip()
+
+
 def build_message(record: dict, previous: dict | None) -> str:
     """Собрать текст уведомления о новой цене."""
     price = record["price"]
@@ -79,18 +99,26 @@ def build_message(record: dict, previous: dict | None) -> str:
     return "\n".join(lines)
 
 
-def build_status_line(route: dict, record: dict | None) -> str:
-    """Блок с текущей ценой по одному маршруту (для команды /check)."""
+def build_status_line(route: dict, record: dict | None, previous: dict | None = None) -> str:
+    """Блок с текущей ценой по одному маршруту (для команды /check).
+
+    previous — прошлая запись по маршруту; если передана, к цене добавляется
+    пометка изменения (насколько и в какую сторону подорожало/подешевело).
+    """
     if record is None:
         return (
             f"✈️ {route_label(route['origin'], route['destination'])}\n"
             f"📅 {format_date_ru(route['depart_date'])}\n"
             f"❌ нет предложений"
         )
+    price_line = f"💰 {_format_price(record['price'], record.get('currency'))}"
+    change = _format_change(record["price"], previous, record.get("currency"))
+    if change:
+        price_line += f" ({change})"
     lines = [
         f"✈️ {route_label(record['origin'], record['destination'])}",
         f"📅 {format_date_ru(record['depart_date'])}",
-        f"💰 {_format_price(record['price'], record.get('currency'))}",
+        price_line,
         f"🏢 {airline_name(record.get('airline'))}",
     ]
     if record.get("link"):
@@ -98,10 +126,14 @@ def build_status_line(route: dict, record: dict | None) -> str:
     return "\n".join(lines)
 
 
-def build_current_report(items: list[tuple[dict, dict | None]]) -> str:
-    """Собрать сводку текущих цен по всем маршрутам."""
+def build_current_report(items: list[tuple[dict, dict | None, dict | None]]) -> str:
+    """Собрать сводку текущих цен по всем маршрутам.
+
+    items — список (route, record, previous); previous нужен, чтобы показать
+    изменение цены относительно прошлой проверки.
+    """
     header = "📊 Текущие цены по запросу:"
-    blocks = [build_status_line(route, record) for route, record in items]
+    blocks = [build_status_line(route, record, previous) for route, record, previous in items]
     return header + "\n\n" + "\n\n".join(blocks)
 
 

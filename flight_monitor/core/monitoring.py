@@ -171,26 +171,29 @@ def run_scheduler(config: dict) -> None:
         time.sleep(30)
 
 
-def fetch_current_prices(config: dict) -> list[tuple[dict, dict | None]]:
+def fetch_current_prices(config: dict) -> list[tuple[dict, dict | None, dict | None]]:
     """Синхронно запросить цены по всем маршрутам (read-through кэш) и сохранить.
 
     Путь команды /check. Соединение SQLite создаётся и используется в одном
-    потоке (иначе sqlite3 ругается). Возвращает список (route, record|None).
+    потоке (иначе sqlite3 ругается). Возвращает список (route, record|None,
+    previous|None), где previous — прошлая запись по маршруту (до этой проверки),
+    нужная, чтобы показать изменение цены.
     """
-    items: list[tuple[dict, dict | None]] = []
+    items: list[tuple[dict, dict | None, dict | None]] = []
     with storage.connect() as conn:
         for route in ROUTES:
             record = fetch_price(config, route)
+            previous = None
             if record is not None:
+                previous = storage.get_last_price(
+                    conn, route["origin"], route["destination"], route["depart_date"]
+                )
                 # /check вызывают часто; пишем точку в историю только если цена
                 # изменилась — иначе плодятся плоские дубли (регулярную выборку
                 # каждые 12 ч обеспечивает плановая джоба, а не эта команда).
-                last = storage.get_last_price(
-                    conn, route["origin"], route["destination"], route["depart_date"]
-                )
-                if last is None or last["price"] != record["price"]:
+                if previous is None or previous["price"] != record["price"]:
                     storage.save_price(conn, record)
-            items.append((route, record))
+            items.append((route, record, previous))
     return items
 
 
