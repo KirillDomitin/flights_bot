@@ -50,8 +50,8 @@ _EXTRACT_JS = r"""(labels) => {
     const logo = el.querySelector('img[src*="al_square"]');
     const sm = logo && (logo.src || '').match(/al_square\/([A-Z0-9]{2})/);
     let stops = null;
-    const stopsM = text.match(/в пути[\s\S]{0,40}?(Прямой|(\d+)\s*пересад)/);
-    if (stopsM) { stops = /Прямой/.test(stopsM[1]) ? 0 : parseInt(stopsM[2], 10); }
+    const stopsM = text.match(/в пути[\s\S]{0,40}?(прям|без пересад|(\d+)\s*пересад)/i);
+    if (stopsM) { stops = stopsM[2] ? parseInt(stopsM[2], 10) : 0; }
     return {
       found: !!price,
       price: price,
@@ -60,12 +60,37 @@ _EXTRACT_JS = r"""(labels) => {
       stops: stops,
     };
   }
+  const out = {};
   for (const label of labels) {
     const r = extract(label);
-    if (r && r.found) return r;
+    if (r && r.found) out[label] = r;
   }
-  return { found: false };
+  return out;
 }"""
+
+
+_CHEAPEST_DIRECT = "Самый дешёвый прямой"
+_CHEAPEST = "Самый дешёвый"
+_PROBE_LABELS = [_CHEAPEST_DIRECT, _CHEAPEST]
+
+
+def _select(found: dict, direct_only: bool) -> Optional[dict]:
+    """Выбрать нужную карточку из найденных (по режиму).
+
+    direct_only: сначала «Самый дешёвый прямой»; если его нет (частый случай на
+    внутренних линиях, где дешёвый и так прямой) — «Самый дешёвый», но только если
+    он прямой (stops == 0). Иначе прямого предложения не нашли (None).
+    Иначе (можно с пересадками): «Самый дешёвый», иначе «Самый дешёвый прямой».
+    """
+    cheap_direct = found.get(_CHEAPEST_DIRECT)
+    cheapest = found.get(_CHEAPEST)
+    if direct_only:
+        if cheap_direct:
+            return cheap_direct
+        if cheapest and cheapest.get("stops") == 0:
+            return cheapest
+        return None
+    return cheapest or cheap_direct
 
 
 def build_search_url(origin: str, destination: str, depart_date: str) -> str:
@@ -83,12 +108,12 @@ def fetch_cheapest(
     timeout: int = 60,
     headless: bool = True,
 ) -> Optional[dict]:
-    """Вернуть самый дешёвый рейс по маршруту на дату или None.
+    """Вернуть самый дешёвый рейс по маршруту на дату или None (см. _select).
 
-    direct_only=True  — берём карточку «Самый дешёвый прямой» (stops=0);
-    direct_only=False — карточку «Самый дешёвый» (может быть с пересадками);
-                        если самый дешёвый оказался прямым, страница может
-                        показать только «Самый дешёвый прямой» — используем её.
+    direct_only=True  — «Самый дешёвый прямой», а если такой карточки нет
+                        (внутренние линии, где дешёвый и так прямой) — «Самый
+                        дешёвый» при условии, что он прямой;
+    direct_only=False — «Самый дешёвый» (может быть с пересадками).
 
     Открывает страницу поиска в Chromium, опрашивает DOM до появления карточки
     (или до таймаута). Ошибки браузера не крашат процесс — логируем и вернём None.
@@ -101,11 +126,6 @@ def fetch_cheapest(
         logger.error("Playwright не установлен. Запустите: playwright install chromium")
         return None
 
-    labels = (
-        ["Самый дешёвый прямой"]
-        if direct_only
-        else ["Самый дешёвый", "Самый дешёвый прямой"]
-    )
     url = build_search_url(origin, destination, depart_date)
     result: Optional[dict] = None
 
@@ -132,16 +152,18 @@ def fetch_cheapest(
 
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
-                    data = page.evaluate(_EXTRACT_JS, labels)
-                    if data.get("found") and data.get("price"):
+                    found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+                    sel = _select(found, direct_only)
+                    if sel and sel.get("price"):
                         # Цена уже есть, но логотип авиакомпании подгружается
                         # чуть позже — ждём и уточняем, чтобы получить IATA-код.
-                        if not data.get("iata"):
+                        if not sel.get("iata"):
                             page.wait_for_timeout(4000)
-                            refined = page.evaluate(_EXTRACT_JS, labels)
-                            if refined.get("price"):
-                                data = refined
-                        result = data
+                            found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+                            sel2 = _select(found, direct_only)
+                            if sel2 and sel2.get("price"):
+                                sel = sel2
+                        result = sel
                         break
                     page.wait_for_timeout(2000)  # мс
             finally:

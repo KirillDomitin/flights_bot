@@ -12,7 +12,7 @@ import time
 import schedule
 
 from flight_monitor import notifier
-from flight_monitor.config import CURRENCY, DEFAULT_ROUTES
+from flight_monitor.config import CHECK_HOURS, CURRENCY, DEFAULT_ROUTES
 from flight_monitor.repository import cache as cache_module
 from flight_monitor.repository import storage
 from flight_monitor.sources import api as api_client
@@ -169,10 +169,11 @@ def show_history() -> None:
 
 
 def run_scheduler(config: dict) -> None:
-    """Запустить блокирующий планировщик (09:00 и 21:00)."""
-    schedule.every().day.at("09:00").do(run_check, config=config)
-    schedule.every().day.at("21:00").do(run_check, config=config)
-    logger.info("Планировщик запущен: проверки в 09:00 и 21:00. Ctrl+C для выхода.")
+    """Запустить блокирующий планировщик (4 раза в сутки, см. CHECK_HOURS)."""
+    for hour in CHECK_HOURS:
+        schedule.every().day.at(f"{hour:02d}:00").do(run_check, config=config)
+    times = ", ".join(f"{h:02d}:00" for h in CHECK_HOURS)
+    logger.info("Планировщик запущен: проверки в %s. Ctrl+C для выхода.", times)
 
     # Первичная проверка сразу при старте
     run_check(config)

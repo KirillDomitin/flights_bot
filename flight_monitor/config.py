@@ -23,6 +23,9 @@ DEFAULT_ROUTES = [
 
 CURRENCY = "rub"
 
+# Часы плановых проверок цен (Europe/Moscow) — 4 раза в сутки, каждые 6 часов
+CHECK_HOURS = (3, 9, 15, 21)
+
 # Источник цен по умолчанию: "browser" — парсинг Aviasales через Playwright
 # (актуальные цены), "api" — кэш Travelpayouts Data API (быстрее, но устаревает).
 DEFAULT_PRICE_SOURCE = "browser"

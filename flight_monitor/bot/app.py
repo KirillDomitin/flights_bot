@@ -7,14 +7,15 @@ from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, CommandHandler, Defaults
 
-from flight_monitor.bot import handlers
+from flight_monitor.bot import handlers, menu
+from flight_monitor.config import CHECK_HOURS
 
 logger = logging.getLogger(__name__)
 
 
 def run_bot(config: dict) -> None:
     """Запустить бота: команды /start /check /chart + плановые проверки
-    09:00/21:00 в одном процессе (через встроенный JobQueue)."""
+    (4 раза в сутки) в одном процессе (через встроенный JobQueue)."""
     # Таймзона для расписания JobQueue (Москва, без перехода на летнее время)
     defaults = Defaults(tzinfo=ZoneInfo("Europe/Moscow"))
     application = (
@@ -27,6 +28,8 @@ def run_bot(config: dict) -> None:
     application.add_handler(CommandHandler("start", handlers.cmd_start))
     application.add_handler(CommandHandler("check", handlers.cmd_check))
     application.add_handler(CommandHandler("chart", handlers.cmd_chart))
+    # Мастер /menu: добавление/удаление маршрутов (команда + inline-кнопки)
+    menu.register(application)
 
     if application.job_queue is None:
         logger.warning(
@@ -34,11 +37,13 @@ def run_bot(config: dict) -> None:
             "Плановые проверки отключены, работает только команда /check."
         )
     else:
-        application.job_queue.run_daily(handlers.job_monitor, time=dtm.time(hour=9, minute=0))
-        application.job_queue.run_daily(handlers.job_monitor, time=dtm.time(hour=21, minute=0))
-        logger.info("Плановые проверки включены: 09:00 и 21:00 (Europe/Moscow).")
+        for hour in CHECK_HOURS:
+            application.job_queue.run_daily(handlers.job_monitor, time=dtm.time(hour=hour, minute=0))
+        times = ", ".join(f"{h:02d}:00" for h in CHECK_HOURS)
+        logger.info("Плановые проверки включены: %s (Europe/Moscow).", times)
 
     logger.info(
         "Бот запущен (polling). /check@ИмяБота — запросить цены. Ctrl+C для выхода."
     )
-    application.run_polling(allowed_updates=["message"])
+    # callback_query нужен для inline-кнопок мастера /menu
+    application.run_polling(allowed_updates=["message", "callback_query"])

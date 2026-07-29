@@ -11,8 +11,10 @@ from pathlib import Path
 from unittest import mock
 
 from flight_monitor import chart, config, notifier
+from flight_monitor.bot import menu
 from flight_monitor.core import monitoring
 from flight_monitor.repository import cache, storage
+from flight_monitor.sources import places
 
 _CONFIG = {
     "travelpayouts_token": "test-token",
@@ -279,6 +281,55 @@ class RoutesTests(unittest.TestCase):
         rid2 = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=True)
         self.assertEqual(rid2, rid)
         self.assertEqual(len(storage.get_active_routes(self.conn)), 1)
+
+
+class _FakeResp:
+    def __init__(self, data) -> None:
+        self._data = data
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self):
+        return self._data
+
+
+class PlacesTests(unittest.TestCase):
+    def test_search_parses_and_orders_city_first(self) -> None:
+        fake = [
+            {"code": "PKX", "name": "Пекин Дасин", "country_name": "Китай", "type": "airport"},
+            {"code": "BJS", "name": "Пекин", "country_name": "Китай", "type": "city"},
+            {"code": "PEK", "name": "Пекин", "country_name": "Китай", "type": "airport"},
+        ]
+        with mock.patch.object(places.httpx, "get", return_value=_FakeResp(fake)):
+            res = places.search_places("Пекин")
+        self.assertEqual(len(res), 3)
+        self.assertEqual(res[0]["type"], "city")   # город вперёд аэропортов
+        self.assertEqual(res[0]["code"], "BJS")
+
+    def test_search_short_term_returns_empty(self) -> None:
+        self.assertEqual(places.search_places("П"), [])
+
+    def test_label(self) -> None:
+        self.assertEqual(
+            places.label({"code": "PEK", "name": "Пекин", "country": "Китай"}),
+            "Пекин, Китай (PEK)",
+        )
+
+
+class CalendarTests(unittest.TestCase):
+    def test_future_month_has_selectable_days_and_header(self) -> None:
+        markup = menu._calendar_markup(2030, 6)
+        datas = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("cal:day:2030-06-15", datas)
+        self.assertIn("Июнь 2030", markup.inline_keyboard[0][1].text)
+
+    def test_prev_disabled_in_current_month(self) -> None:
+        from datetime import date
+
+        today = date.today()
+        markup = menu._calendar_markup(today.year, today.month)
+        self.assertEqual(markup.inline_keyboard[0][0].callback_data, "cal:ignore")
 
 
 class ChartTests(unittest.TestCase):
