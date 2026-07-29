@@ -13,10 +13,12 @@ from dotenv import load_dotenv
 
 from flight_monitor.repository import cache as cache_module
 
-# Отслеживаемые перелёты (open-jaw: MOW→PEK 22.09, SHA→MOW 30.09)
-ROUTES = [
-    {"origin": "MOW", "destination": "PEK", "depart_date": "2026-09-22"},
-    {"origin": "SHA", "destination": "MOW", "depart_date": "2026-09-30"},
+# Маршруты по умолчанию — ими сидится таблица routes при первом запуске
+# (open-jaw: MOW→PEK 22.09, SHA→MOW 30.09; оба — только прямые рейсы).
+# Дальше маршрутами управляют через меню бота, а не через эту константу.
+DEFAULT_ROUTES = [
+    {"origin": "MOW", "destination": "PEK", "depart_date": "2026-09-22", "direct_only": True},
+    {"origin": "SHA", "destination": "MOW", "depart_date": "2026-09-30", "direct_only": True},
 ]
 
 CURRENCY = "rub"

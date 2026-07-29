@@ -12,13 +12,20 @@ import time
 import schedule
 
 from flight_monitor import notifier
-from flight_monitor.config import CURRENCY, ROUTES
+from flight_monitor.config import CURRENCY, DEFAULT_ROUTES
 from flight_monitor.repository import cache as cache_module
 from flight_monitor.repository import storage
 from flight_monitor.sources import api as api_client
 from flight_monitor.sources import browser as browser_client
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_seeded() -> None:
+    """Засеять таблицу routes маршрутами по умолчанию при первом запуске.
+    Идемпотентно — на непустой таблице ничего не делает."""
+    with storage.connect() as conn:
+        storage.seed_routes(conn, DEFAULT_ROUTES)
 
 
 def _fetch_price_uncached(config: dict, route: dict) -> dict | None:
@@ -115,7 +122,7 @@ def collect_check_messages(config: dict) -> list[str]:
     logger.info("=== Проверка цен ===")
     messages: list[str] = []
     with storage.connect() as conn:
-        for route in ROUTES:
+        for route in storage.get_active_routes(conn):
             try:
                 message = check_route(conn, config, route)
                 if message:
@@ -142,7 +149,7 @@ def run_check(config: dict) -> None:
 def show_history() -> None:
     """Вывести историю цен из БД в консоль."""
     with storage.connect() as conn:
-        for route in ROUTES:
+        for route in storage.get_active_routes(conn):
             print(f"\n{route['origin']} → {route['destination']} ({route['depart_date']}):")
             history = storage.get_history(
                 conn, route["origin"], route["destination"], limit=20
@@ -181,7 +188,7 @@ def fetch_current_prices(config: dict) -> list[tuple[dict, dict | None, dict | N
     """
     items: list[tuple[dict, dict | None, dict | None]] = []
     with storage.connect() as conn:
-        for route in ROUTES:
+        for route in storage.get_active_routes(conn):
             record = fetch_price(config, route)
             previous = None
             if record is not None:
@@ -211,6 +218,6 @@ def build_chart_png() -> bytes | None:
             (route, storage.get_route_series(
                 conn, route["origin"], route["destination"], route["depart_date"]
             ))
-            for route in ROUTES
+            for route in storage.get_active_routes(conn)
         ]
     return chart.render_price_chart(series)

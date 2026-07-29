@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from flight_monitor import chart, notifier
+from flight_monitor import chart, config, notifier
 from flight_monitor.core import monitoring
 from flight_monitor.repository import cache, storage
 
@@ -213,6 +213,50 @@ class CacheTests(unittest.TestCase):
             monitoring.fetch_price(cfg, _ROUTE)
             monitoring.fetch_price(cfg, _ROUTE)
         self.assertEqual(m.call_count, 2)  # None не кэшируется → всегда запрос
+
+
+class RoutesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        db_path = Path(self._tmp.name) / "test.db"
+        self.conn = storage.get_connection(db_path)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def test_seed_fills_empty_then_idempotent(self) -> None:
+        self.assertEqual(storage.get_active_routes(self.conn), [])
+        storage.seed_routes(self.conn, config.DEFAULT_ROUTES)
+        routes = storage.get_active_routes(self.conn)
+        self.assertEqual(len(routes), len(config.DEFAULT_ROUTES))
+        self.assertEqual(routes[0]["origin"], "MOW")
+        self.assertTrue(routes[0]["direct_only"])
+        # повторный сид ничего не добавляет
+        storage.seed_routes(self.conn, config.DEFAULT_ROUTES)
+        self.assertEqual(len(storage.get_active_routes(self.conn)), len(config.DEFAULT_ROUTES))
+
+    def test_add_and_remove_route(self) -> None:
+        rid = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=False)
+        self.assertIsNotNone(rid)
+        routes = storage.get_active_routes(self.conn)
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0]["destination"], "AER")
+        self.assertFalse(routes[0]["direct_only"])
+        # удаление → пропадает из активных
+        self.assertTrue(storage.remove_route(self.conn, rid))
+        self.assertEqual(storage.get_active_routes(self.conn), [])
+        # повторное удаление уже неактивного → False
+        self.assertFalse(storage.remove_route(self.conn, rid))
+
+    def test_add_duplicate_reactivates(self) -> None:
+        rid = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=True)
+        storage.remove_route(self.conn, rid)
+        self.assertEqual(storage.get_active_routes(self.conn), [])
+        # тот же маршрут снова → включается обратно, без дублей
+        rid2 = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=True)
+        self.assertEqual(rid2, rid)
+        self.assertEqual(len(storage.get_active_routes(self.conn)), 1)
 
 
 class ChartTests(unittest.TestCase):

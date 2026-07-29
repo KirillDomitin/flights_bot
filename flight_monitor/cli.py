@@ -17,6 +17,8 @@ logger = logging.getLogger("flight_monitor")
 
 def main() -> None:
     config_module.setup_logging()
+    # Засеять маршруты по умолчанию при первом запуске (для всех режимов).
+    monitoring.ensure_seeded()
 
     parser = argparse.ArgumentParser(description="Мониторинг цен на авиабилеты")
     parser.add_argument(
