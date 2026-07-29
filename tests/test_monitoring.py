@@ -35,6 +35,7 @@ def _record(price: int) -> dict:
         "airline": "SU",
         "flight_number": 200,
         "link": "https://www.aviasales.ru/search/MOW2209PEK1",
+        "stops": 0,
         "currency": "rub",
     }
 
@@ -53,7 +54,7 @@ class CheckRouteTests(unittest.TestCase):
     def _run(self, price: int) -> str | None:
         """Выполнить check_route с замоканным API, вернуть текст уведомления/None."""
         with mock.patch.object(
-            monitoring.api_client, "fetch_direct_price", return_value=_record(price)
+            monitoring.api_client, "fetch_price", return_value=_record(price)
         ):
             return monitoring.check_route(self.conn, _CONFIG, _ROUTE)
 
@@ -83,7 +84,7 @@ class CheckRouteTests(unittest.TestCase):
 
     def test_api_none_skips_everything(self) -> None:
         with mock.patch.object(
-            monitoring.api_client, "fetch_direct_price", return_value=None
+            monitoring.api_client, "fetch_price", return_value=None
         ):
             message = monitoring.check_route(self.conn, _CONFIG, _ROUTE)
         self.assertIsNone(message)
@@ -148,12 +149,33 @@ class MessageFormatTests(unittest.TestCase):
         self.assertNotIn("🔻", line)
         self.assertNotIn("без изменений", line)
 
+    def test_stops_label_pluralization(self) -> None:
+        self.assertEqual(notifier._stops_label(0), "прямой")
+        self.assertEqual(notifier._stops_label(1), "1 пересадка")
+        self.assertEqual(notifier._stops_label(2), "2 пересадки")
+        self.assertEqual(notifier._stops_label(5), "5 пересадок")
+        self.assertEqual(notifier._stops_label(11), "11 пересадок")
+        self.assertIsNone(notifier._stops_label(None))
+
+    def test_status_line_shows_stops(self) -> None:
+        direct = notifier.build_status_line(_ROUTE, _record(27829))
+        self.assertIn("прямой", direct)
+        with_stops = notifier.build_status_line(_ROUTE, dict(_record(19989), stops=1))
+        self.assertIn("1 пересадка", with_stops)
+
 
 class CacheTests(unittest.TestCase):
-    def test_price_key_includes_source_and_route(self) -> None:
+    def test_price_key_includes_source_mode_and_route(self) -> None:
+        # _ROUTE без direct_only → по умолчанию прямой (mode=d)
         self.assertEqual(
             cache.price_key("browser", _ROUTE),
-            "price:browser:MOW:PEK:2025-09-22",
+            "price:browser:d:MOW:PEK:2025-09-22",
+        )
+        # с пересадками → mode=c, ключ отличается
+        route_c = dict(_ROUTE, direct_only=False)
+        self.assertEqual(
+            cache.price_key("browser", route_c),
+            "price:browser:c:MOW:PEK:2025-09-22",
         )
 
     def test_memory_cache_hit_and_miss(self) -> None:

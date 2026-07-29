@@ -1,4 +1,4 @@
-"""Запросы к Travelpayouts Data API."""
+"""Запросы к Travelpayouts Data API (запасной источник цен)."""
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.travelpayouts.com"
-DIRECT_ENDPOINT = "/v1/prices/direct"
+DIRECT_ENDPOINT = "/v1/prices/direct"   # только прямые рейсы
+CHEAP_ENDPOINT = "/v1/prices/cheap"     # самые дешёвые, пересадки допускаются
 TIMEOUT = 20.0
 
 
@@ -24,20 +25,25 @@ def _build_link(origin: str, destination: str, depart_date: str) -> str:
     return f"https://www.aviasales.ru/search/{origin}{ddmm}{destination}1"
 
 
-def fetch_direct_price(
+def fetch_price(
     token: str,
     origin: str,
     destination: str,
     depart_date: str,
     currency: str = "rub",
+    direct_only: bool = True,
 ) -> Optional[dict]:
     """
-    Запросить минимальную цену прямого рейса по маршруту на дату.
+    Запросить минимальную цену по маршруту на дату из кэша Travelpayouts.
 
-    Возвращает dict с полями origin/destination/depart_date/price/airline/
-    flight_number/link/currency или None, если данных нет либо произошла
-    ошибка сети (не крашим процесс — логируем и идём дальше).
+    direct_only=True  — только прямые рейсы (`/v1/prices/direct`, stops=0);
+    direct_only=False — самые дешёвые с пересадками (`/v1/prices/cheap`).
+
+    Возвращает dict (origin/destination/depart_date/price/airline/flight_number/
+    stops/link/currency) или None, если данных нет либо ошибка сети (не крашим
+    процесс — логируем и идём дальше).
     """
+    endpoint = DIRECT_ENDPOINT if direct_only else CHEAP_ENDPOINT
     params = {
         "origin": origin,
         "destination": destination,
@@ -48,7 +54,7 @@ def fetch_direct_price(
 
     try:
         response = httpx.get(
-            f"{BASE_URL}{DIRECT_ENDPOINT}",
+            f"{BASE_URL}{endpoint}",
             params=params,
             headers=headers,
             timeout=TIMEOUT,
@@ -78,6 +84,9 @@ def fetch_direct_price(
         logger.info("В предложении отсутствует цена %s→%s", origin, destination)
         return None
 
+    # Число пересадок: для direct — 0; для cheap — из поля ответа, если оно есть
+    stops = 0 if direct_only else best.get("number_of_changes")
+
     record = {
         "origin": origin,
         "destination": destination,
@@ -85,14 +94,13 @@ def fetch_direct_price(
         "price": int(price),
         "airline": best.get("airline"),
         "flight_number": best.get("flight_number"),
+        "stops": stops,
         "link": _build_link(origin, destination, depart_date),
         "currency": payload.get("currency", currency),
     }
     logger.info(
-        "Получена цена %s→%s: %s %s",
-        origin,
-        destination,
-        record["price"],
-        record["currency"],
+        "Получена цена (%s) %s→%s: %s %s",
+        "прямой" if direct_only else "с пересадками",
+        origin, destination, record["price"], record["currency"],
     )
     return record

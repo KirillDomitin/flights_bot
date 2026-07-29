@@ -2,10 +2,14 @@
 
 Aviasales — это SPA: цены подгружаются в браузере после рендера, поэтому
 обычным HTTP-запросом их не получить. Открываем ссылку поиска в Chromium,
-ждём появления карточки «Самый дешёвый прямой» и читаем её цену и
-авиакомпанию (IATA-код берётся из URL логотипа img.avs.io/.../al_square/XX).
+ждём появления нужной карточки и читаем её цену, авиакомпанию и число пересадок.
 
-Метод извлечения проверен на живых страницах MOW→PEK и SHA→MOW.
+Карточки на странице:
+  «Самый дешёвый прямой»  — берём при direct_only=True;
+  «Самый дешёвый»         — самый дешёвый вообще (может быть с пересадками),
+                            берём при direct_only=False.
+IATA-код авиакомпании — из URL логотипа img.avs.io/.../al_square/XX.
+Метод извлечения проверен на живых страницах MOW→PEK / SHA→MOW.
 """
 from __future__ import annotations
 
@@ -21,33 +25,46 @@ _USER_AGENT = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# JS ищет карточку с меткой «Самый дешёвый прямой» и достаёт из неё цену
-# (первое число перед ₽) и авиакомпанию (alt логотипа + IATA из src).
-_EXTRACT_JS = r"""() => {
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  let labelNode = null;
-  while (walker.nextNode()) {
-    if (walker.currentNode.textContent.trim() === 'Самый дешёвый прямой') {
-      labelNode = walker.currentNode; break;
+# JS перебирает переданные метки карточек, находит первую, поднимается до самой
+# карточки (содержит ₽ и «в пути») и достаёт цену, авиакомпанию и число пересадок
+# (из строки «… в пути / Прямой» или «… в пути / N пересадка»).
+_EXTRACT_JS = r"""(labels) => {
+  function extract(label) {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let labelNode = null;
+    while (walker.nextNode()) {
+      if (walker.currentNode.textContent.trim() === label) {
+        labelNode = walker.currentNode; break;
+      }
     }
+    if (!labelNode) return null;
+    let el = labelNode.parentElement;
+    while (el && el.parentElement &&
+           !(/₽/.test(el.innerText) && /в пути/.test(el.innerText))) {
+      el = el.parentElement;
+    }
+    if (!el) return null;
+    const text = el.innerText;
+    const priceM = text.match(/([\d\s   ⁠]+)₽/);
+    const price = priceM ? priceM[1].replace(/[\s   ⁠]/g, '') : null;
+    const logo = el.querySelector('img[src*="al_square"]');
+    const sm = logo && (logo.src || '').match(/al_square\/([A-Z0-9]{2})/);
+    let stops = null;
+    const stopsM = text.match(/в пути[\s\S]{0,40}?(Прямой|(\d+)\s*пересад)/);
+    if (stopsM) { stops = /Прямой/.test(stopsM[1]) ? 0 : parseInt(stopsM[2], 10); }
+    return {
+      found: !!price,
+      price: price,
+      iata: sm ? sm[1] : null,
+      name: logo ? logo.alt : null,
+      stops: stops,
+    };
   }
-  if (!labelNode) return { found: false };
-  let el = labelNode.parentElement;
-  while (el && el.parentElement &&
-         !(/₽/.test(el.innerText) && /в пути/.test(el.innerText))) {
-    el = el.parentElement;
+  for (const label of labels) {
+    const r = extract(label);
+    if (r && r.found) return r;
   }
-  if (!el) return { found: false };
-  const priceM = el.innerText.match(/([\d\s  ]+)₽/);
-  const price = priceM ? priceM[1].replace(/[\s  ]/g, '') : null;
-  const logo = el.querySelector('img[src*="al_square"]');
-  const sm = logo && (logo.src || '').match(/al_square\/([A-Z0-9]{2})/);
-  return {
-    found: !!price,
-    price: price,
-    iata: sm ? sm[1] : null,
-    name: logo ? logo.alt : null,
-  };
+  return { found: false };
 }"""
 
 
@@ -57,20 +74,24 @@ def build_search_url(origin: str, destination: str, depart_date: str) -> str:
     return f"https://www.aviasales.ru/search/{origin}{dt.strftime('%d%m')}{destination}1"
 
 
-def fetch_cheapest_direct(
+def fetch_cheapest(
     origin: str,
     destination: str,
     depart_date: str,
     *,
+    direct_only: bool = True,
     timeout: int = 60,
     headless: bool = True,
 ) -> Optional[dict]:
-    """
-    Вернуть самый дешёвый ПРЯМОЙ рейс по маршруту на дату или None.
+    """Вернуть самый дешёвый рейс по маршруту на дату или None.
 
-    Открывает страницу поиска в Chromium, опрашивает DOM до появления
-    карточки «Самый дешёвый прямой» (или до таймаута). Ошибки браузера
-    не крашат процесс — логируем и возвращаем None.
+    direct_only=True  — берём карточку «Самый дешёвый прямой» (stops=0);
+    direct_only=False — карточку «Самый дешёвый» (может быть с пересадками);
+                        если самый дешёвый оказался прямым, страница может
+                        показать только «Самый дешёвый прямой» — используем её.
+
+    Открывает страницу поиска в Chromium, опрашивает DOM до появления карточки
+    (или до таймаута). Ошибки браузера не крашат процесс — логируем и вернём None.
     """
     # Импортируем внутри функции: playwright не нужен, если выбран API-режим.
     try:
@@ -80,6 +101,11 @@ def fetch_cheapest_direct(
         logger.error("Playwright не установлен. Запустите: playwright install chromium")
         return None
 
+    labels = (
+        ["Самый дешёвый прямой"]
+        if direct_only
+        else ["Самый дешёвый", "Самый дешёвый прямой"]
+    )
     url = build_search_url(origin, destination, depart_date)
     result: Optional[dict] = None
 
@@ -106,13 +132,13 @@ def fetch_cheapest_direct(
 
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
-                    data = page.evaluate(_EXTRACT_JS)
+                    data = page.evaluate(_EXTRACT_JS, labels)
                     if data.get("found") and data.get("price"):
                         # Цена уже есть, но логотип авиакомпании подгружается
                         # чуть позже — ждём и уточняем, чтобы получить IATA-код.
                         if not data.get("iata"):
                             page.wait_for_timeout(4000)
-                            refined = page.evaluate(_EXTRACT_JS)
+                            refined = page.evaluate(_EXTRACT_JS, labels)
                             if refined.get("price"):
                                 data = refined
                         result = data
@@ -127,13 +153,17 @@ def fetch_cheapest_direct(
         logger.error("Ошибка парсинга Aviasales %s→%s: %s", origin, destination, exc)
         return None
 
+    mode = "прямой" if direct_only else "с пересадками"
     if not result:
         logger.info(
-            "Нет прямых предложений %s→%s на %s (карточка не найдена за %sс)",
-            origin, destination, depart_date, timeout,
+            "Нет предложений (%s) %s→%s на %s (карточка не найдена за %sс)",
+            mode, origin, destination, depart_date, timeout,
         )
         return None
 
+    stops = result.get("stops")
+    if stops is None:
+        stops = 0 if direct_only else None
     record = {
         "origin": origin,
         "destination": destination,
@@ -141,11 +171,13 @@ def fetch_cheapest_direct(
         "price": int(result["price"]),
         "airline": result.get("iata"),
         "flight_number": None,
+        "stops": stops,
         "link": url,
         "currency": "rub",
     }
     logger.info(
-        "Aviasales: самый дешёвый прямой %s→%s: %s ₽ (%s)",
-        origin, destination, record["price"], result.get("name") or "—",
+        "Aviasales: самый дешёвый (%s) %s→%s: %s ₽ (%s, пересадок: %s)",
+        mode, origin, destination, record["price"],
+        result.get("name") or "—", stops if stops is not None else "?",
     )
     return record

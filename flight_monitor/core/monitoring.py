@@ -29,19 +29,23 @@ def ensure_seeded() -> None:
 
 
 def _fetch_price_uncached(config: dict, route: dict) -> dict | None:
-    """Прямой запрос цены из выбранного источника (browser/api), без кэша."""
+    """Прямой запрос цены из выбранного источника (browser/api), без кэша.
+    Тип рейса (прямой/с пересадками) берётся из маршрута (route['direct_only'])."""
+    direct_only = route.get("direct_only", True)
     if config["price_source"] == "api":
-        return api_client.fetch_direct_price(
+        return api_client.fetch_price(
             token=config["travelpayouts_token"],
             origin=route["origin"],
             destination=route["destination"],
             depart_date=route["depart_date"],
             currency=CURRENCY,
+            direct_only=direct_only,
         )
-    return browser_client.fetch_cheapest_direct(
+    return browser_client.fetch_cheapest(
         route["origin"],
         route["destination"],
         route["depart_date"],
+        direct_only=direct_only,
         headless=config["headless"],
     )
 

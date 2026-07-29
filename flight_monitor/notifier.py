@@ -17,6 +17,7 @@ _AIRLINES = {
     "MU": "China Eastern",
     "CZ": "China Southern",
     "HU": "Hainan Airlines",
+    "3U": "Sichuan Airlines",
     "S7": "S7 Airlines",
     "U6": "Уральские авиалинии",
 }
@@ -77,12 +78,34 @@ def _format_change(price: int, previous: dict | None, currency: str | None) -> s
     return f"{arrow} {amount} {symbol}, {pct:+d}%".strip()
 
 
+def _stops_label(stops: int | None) -> str | None:
+    """0 -> 'прямой', 1 -> '1 пересадка', 2 -> '2 пересадки', 5 -> '5 пересадок'.
+    None -> None (число пересадок неизвестно — подпись не показываем)."""
+    if stops is None:
+        return None
+    if stops == 0:
+        return "прямой"
+    n = stops % 100
+    if 11 <= n <= 14:
+        word = "пересадок"
+    elif stops % 10 == 1:
+        word = "пересадка"
+    elif stops % 10 in (2, 3, 4):
+        word = "пересадки"
+    else:
+        word = "пересадок"
+    return f"{stops} {word}"
+
+
 def build_message(record: dict, previous: dict | None) -> str:
     """Собрать текст уведомления о новой цене."""
     price = record["price"]
     currency = record.get("currency")
 
     price_line = f"💰 {_format_price(price, currency)}"
+    stops_label = _stops_label(record.get("stops"))
+    if stops_label:
+        price_line += f" · {stops_label}"
     if previous:
         old = previous["price"]
         diff_pct = round((price - old) / old * 100) if old else 0
@@ -112,6 +135,9 @@ def build_status_line(route: dict, record: dict | None, previous: dict | None = 
             f"❌ нет предложений"
         )
     price_line = f"💰 {_format_price(record['price'], record.get('currency'))}"
+    stops_label = _stops_label(record.get("stops"))
+    if stops_label:
+        price_line += f" · {stops_label}"
     change = _format_change(record["price"], previous, record.get("currency"))
     if change:
         price_line += f" ({change})"
