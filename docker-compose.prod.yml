@@ -1,0 +1,22 @@
+# Оверлей для домашнего сервера (там, где в Docker уже крутится cloudflared).
+#
+# Подключает бота к внешней сети `proxy` — той же, где cloudflared, — чтобы
+# туннель резолвил origin по имени контейнера: http://flight-monitor-bot:8443.
+# Наружу порты не публикуем: HTTPS терминирует Cloudflare на своём edge.
+#
+# Запуск на сервере (оба файла, базовый + этот):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# BOT_MODE=webhook форсируется здесь; WEBHOOK_URL и WEBHOOK_SECRET берутся из
+# .env на сервере (если их нет — бот падает на старте с понятной ошибкой).
+services:
+  bot:
+    environment:
+      BOT_MODE: webhook
+    networks:
+      - default   # сеть проекта по умолчанию — связь bot ↔ redis
+      - proxy     # общая сеть с cloudflared
+
+networks:
+  proxy:
+    external: true   # уже существует на сервере, создаётся не нами
