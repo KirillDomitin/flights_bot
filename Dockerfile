@@ -1,7 +1,9 @@
-# Лёгкая база: python-slim (Docker Hub, быстро) + доустановка ТОЛЬКО Chromium.
-# Официальный образ mcr.microsoft.com/playwright тянет Chromium+Firefox+WebKit
-# (~1.8 ГБ) и отдаётся с mcr крайне медленно — нам же нужен один браузер.
-FROM python:3.12-slim
+# Официальный образ Playwright: Python + Chromium + системные зависимости
+# уже внутри (тег совпадает с версией playwright из requirements.txt).
+# Тяжёлый (~1.8 ГБ), но на сервере уже скачан и закэширован — пересборка при
+# правках идёт по кэшу. Лёгкую базу (python-slim + chromium) отложили: mcr
+# отдаётся очень медленно только при ПЕРВОМ пулле, а он уже позади.
+FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 
 WORKDIR /app
 
@@ -9,15 +11,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Chromium + системные библиотеки для него. `--with-deps` сам делает apt-get
-# update и ставит нужные пакеты; браузер кладётся в кэш Playwright внутри образа.
-RUN playwright install --with-deps chromium
-
 # Код приложения
 COPY . .
 
-# БД SQLite держим в примонтированном томе (см. docker-compose*.yml), а не в образе.
-# Таймзону обеспечивает pip-пакет tzdata (zoneinfo), OS-tzdata в slim не нужен.
+# БД SQLite держим в примонтированном томе (см. docker-compose*.yml), а не в образе
 ENV MONITOR_DB_PATH=/app/data/prices.db \
     PRICE_SOURCE=browser \
     MONITOR_HEADLESS=true \
