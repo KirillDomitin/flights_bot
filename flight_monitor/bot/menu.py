@@ -97,15 +97,17 @@ async def menu_back(update, context) -> None:
     )
 
 
+def _route_line(r: dict) -> str:
+    typ = "прямой" if r["direct_only"] else "с пересадками"
+    return f"{r['origin']}→{r['destination']} · {notifier.format_date_ru(r['depart_date'])} · {typ}"
+
+
 def _routes_markup(routes: list[dict]) -> InlineKeyboardMarkup:
-    """Список маршрутов с кнопками удаления и кнопкой «Назад» внизу."""
-    rows = []
-    for r in routes:
-        typ = "прямой" if r["direct_only"] else "с пересадками"
-        rows.append([InlineKeyboardButton(
-            f"🗑 {r['origin']}→{r['destination']} · {notifier.format_date_ru(r['depart_date'])} · {typ}",
-            callback_data=f"route:del:{r['id']}",
-        )])
+    """Список маршрутов (тап → подтверждение удаления) и кнопка «Назад» внизу."""
+    rows = [
+        [InlineKeyboardButton(f"🗑 {_route_line(r)}", callback_data=f"route:ask:{r['id']}")]
+        for r in routes
+    ]
     rows.append([InlineKeyboardButton("⬅ Назад", callback_data="menu:back")])
     return InlineKeyboardMarkup(rows)
 
@@ -125,8 +127,25 @@ async def menu_list(update, context) -> None:
     await query.edit_message_text(_list_text(routes), reply_markup=_routes_markup(routes))
 
 
+async def route_ask(update, context) -> None:
+    """Callback route:ask:<id> — спросить подтверждение удаления маршрута."""
+    query = update.callback_query
+    await query.answer()
+    route_id = int(query.data.split(":")[2])
+    routes = context.bot_data["config"]["db"].get_active_routes()
+    route = next((r for r in routes if r["id"] == route_id), None)
+    if route is None:  # уже удалён кем-то — просто показываем актуальный список
+        await query.edit_message_text(_list_text(routes), reply_markup=_routes_markup(routes))
+        return
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Да, удалить", callback_data=f"route:del:{route_id}")],
+        [InlineKeyboardButton("⬅ Отмена", callback_data="menu:list")],
+    ])
+    await query.edit_message_text(f"Удалить перелёт?\n\n{_route_line(route)}", reply_markup=kb)
+
+
 async def route_del(update, context) -> None:
-    """Callback route:del:<id> — убрать маршрут и обновить список."""
+    """Callback route:del:<id> — удалить маршрут (после подтверждения) и обновить список."""
     query = update.callback_query
     route_id = int(query.data.split(":")[2])
     repo = context.bot_data["config"]["db"]
@@ -318,4 +337,5 @@ def register(application) -> None:
     application.add_handler(conv)
     application.add_handler(CallbackQueryHandler(menu_list, pattern="^menu:list$"))
     application.add_handler(CallbackQueryHandler(menu_back, pattern="^menu:back$"))
+    application.add_handler(CallbackQueryHandler(route_ask, pattern="^route:ask:"))
     application.add_handler(CallbackQueryHandler(route_del, pattern="^route:del:"))
