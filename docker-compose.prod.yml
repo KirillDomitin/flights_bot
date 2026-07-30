@@ -1,22 +1,55 @@
-# Оверлей для домашнего сервера (там, где в Docker уже крутится cloudflared).
+# Самодостаточный стек для Portainer (Stacks → Add stack → Repository).
 #
-# Подключает бота к внешней сети `proxy` — той же, где cloudflared, — чтобы
-# туннель резолвил origin по имени контейнера: http://flight-monitor-bot:8443.
-# Наружу порты не публикуем: HTTPS терминирует Cloudflare на своём edge.
+# Portainer клонирует репозиторий, билдит образ из Dockerfile и поднимает бота
+# в режиме webhook. Секреты (токены, WEBHOOK_*) задаются НЕ в этом файле, а в
+# разделе "Environment variables" стека Portainer — оттуда подставляются в
+# ${...} ниже. В репозитории .env нет (он в .gitignore), поэтому все нужные
+# переменные прокидываем в контейнер явно через environment.
 #
-# Запуск на сервере (оба файла, базовый + этот):
-#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Требования на хосте:
+#   - внешняя сеть `proxy` (та же, где cloudflared) — уже существует;
+#   - в Cloudflare Zero Trust: Public Hostname flights.domitin.ru →
+#     http://flight-monitor-bot:8443
 #
-# BOT_MODE=webhook форсируется здесь; WEBHOOK_URL и WEBHOOK_SECRET берутся из
-# .env на сервере (если их нет — бот падает на старте с понятной ошибкой).
+# Portainer stack env vars (обязательные):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_URL, WEBHOOK_SECRET
 services:
   bot:
+    build: .
+    image: flight-monitor:latest
+    container_name: flight-monitor-bot
+    restart: unless-stopped
     environment:
+      # --- секреты из stack env Portainer ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      WEBHOOK_URL: ${WEBHOOK_URL}          # напр. https://flights.domitin.ru/<путь>
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}    # длинная случайная строка
+      # --- режим и инфраструктура ---
       BOT_MODE: webhook
+      WEBHOOK_PORT: "8443"                 # cloudflared ходит на этот порт по сети proxy
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL_SECONDS: "900"
+      MONITOR_DB_PATH: /app/data/prices.db
+      TZ: Europe/Moscow
+    depends_on:
+      - redis
+    volumes:
+      - prices-data:/app/data
     networks:
-      - default   # сеть проекта по умолчанию — связь bot ↔ redis
-      - proxy     # общая сеть с cloudflared
+      - default   # связь bot ↔ redis (сеть стека по умолчанию)
+      - proxy     # общая сеть с cloudflared (резолв flight-monitor-bot:8443)
+
+  redis:
+    image: redis:7-alpine
+    container_name: flight-monitor-redis
+    restart: unless-stopped
+    networks:
+      - default
 
 networks:
   proxy:
     external: true   # уже существует на сервере, создаётся не нами
+
+volumes:
+  prices-data:
