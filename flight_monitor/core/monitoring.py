@@ -14,18 +14,16 @@ import schedule
 from flight_monitor import notifier
 from flight_monitor.config import CHECK_HOURS, CURRENCY, DEFAULT_ROUTES
 from flight_monitor.repository import cache as cache_module
-from flight_monitor.repository import storage
+from flight_monitor.repository.storage import Repository
 from flight_monitor.sources import api as api_client
 from flight_monitor.sources import browser as browser_client
 
 logger = logging.getLogger(__name__)
 
 
-def ensure_seeded() -> None:
-    """Засеять таблицу routes маршрутами по умолчанию при первом запуске.
-    Идемпотентно — на непустой таблице ничего не делает."""
-    with storage.connect() as conn:
-        storage.seed_routes(conn, DEFAULT_ROUTES)
+def ensure_seeded(repo: Repository) -> None:
+    """Засеять маршруты по умолчанию при первом запуске (идемпотентно)."""
+    repo.seed_routes(DEFAULT_ROUTES)
 
 
 def _fetch_price_uncached(config: dict, route: dict) -> dict | None:
@@ -83,11 +81,11 @@ def fetch_price(
     return record
 
 
-def check_route(conn, config: dict, route: dict) -> str | None:
-    """Проверить одну связку: запросить самый дешёвый прямой рейс, сравнить с
-    прошлой ценой, сохранить. Вернуть текст уведомления, если цена снизилась
-    (или это первый запуск), иначе None. Само сообщение здесь не отправляется —
-    его шлёт вызывающая сторона (CLI/schedule или бот через свой event loop).
+def check_route(repo: Repository, config: dict, route: dict) -> str | None:
+    """Проверить одну связку: запросить самый дешёвый рейс, сравнить с прошлой
+    ценой, сохранить. Вернуть текст уведомления, если цена снизилась (или это
+    первый запуск), иначе None. Само сообщение здесь не отправляется — его шлёт
+    вызывающая сторона (CLI/schedule или бот через свой event loop).
 
     Мониторинг (джоба/CLI) всегда делает свежий запрос и перезаписывает кэш —
     read_cache=False, — чтобы гарантированно получить точку истории и отработать
@@ -97,8 +95,8 @@ def check_route(conn, config: dict, route: dict) -> str | None:
     if record is None:
         return None
 
-    previous = storage.get_last_price(
-        conn, route["origin"], route["destination"], route["depart_date"]
+    previous = repo.get_last_price(
+        route["origin"], route["destination"], route["depart_date"]
     )
 
     # Уведомляем при первом запуске или при снижении цены
@@ -117,27 +115,27 @@ def check_route(conn, config: dict, route: dict) -> str | None:
             previous["price"],
         )
 
-    storage.save_price(conn, record)
+    repo.save_price(record)
     return message
 
 
 def collect_check_messages(config: dict) -> list[str]:
     """Проверить все маршруты и вернуть список уведомлений к отправке."""
     logger.info("=== Проверка цен ===")
+    repo: Repository = config["db"]
     messages: list[str] = []
-    with storage.connect() as conn:
-        for route in storage.get_active_routes(conn):
-            try:
-                message = check_route(conn, config, route)
-                if message:
-                    messages.append(message)
-            except Exception as exc:  # noqa: BLE001 — один маршрут не рушит остальные
-                logger.error(
-                    "Ошибка обработки %s→%s: %s",
-                    route["origin"],
-                    route["destination"],
-                    exc,
-                )
+    for route in repo.get_active_routes():
+        try:
+            message = check_route(repo, config, route)
+            if message:
+                messages.append(message)
+        except Exception as exc:  # noqa: BLE001 — один маршрут не рушит остальные
+            logger.error(
+                "Ошибка обработки %s→%s: %s",
+                route["origin"],
+                route["destination"],
+                exc,
+            )
     logger.info("=== Проверка завершена ===")
     return messages
 
@@ -150,22 +148,19 @@ def run_check(config: dict) -> None:
         )
 
 
-def show_history() -> None:
+def show_history(repo: Repository) -> None:
     """Вывести историю цен из БД в консоль."""
-    with storage.connect() as conn:
-        for route in storage.get_active_routes(conn):
-            print(f"\n{route['origin']} → {route['destination']} ({route['depart_date']}):")
-            history = storage.get_history(
-                conn, route["origin"], route["destination"], limit=20
+    for route in repo.get_active_routes():
+        print(f"\n{route['origin']} → {route['destination']} ({route['depart_date']}):")
+        history = repo.get_history(route["origin"], route["destination"], limit=20)
+        if not history:
+            print("  (нет данных)")
+            continue
+        for row in history:
+            print(
+                f"  {row['ts']}  {row['price']:>8} {row['currency'] or ''}"
+                f"  {row['airline'] or '—'}"
             )
-            if not history:
-                print("  (нет данных)")
-                continue
-            for row in history:
-                print(
-                    f"  {row['ts']}  {row['price']:>8} {row['currency'] or ''}"
-                    f"  {row['airline'] or '—'}"
-                )
 
 
 def run_scheduler(config: dict) -> None:
@@ -186,43 +181,40 @@ def run_scheduler(config: dict) -> None:
 def fetch_current_prices(config: dict) -> list[tuple[dict, dict | None, dict | None]]:
     """Синхронно запросить цены по всем маршрутам (read-through кэш) и сохранить.
 
-    Путь команды /check. Соединение SQLite создаётся и используется в одном
-    потоке (иначе sqlite3 ругается). Возвращает список (route, record|None,
-    previous|None), где previous — прошлая запись по маршруту (до этой проверки),
-    нужная, чтобы показать изменение цены.
+    Путь команды /check. Возвращает список (route, record|None, previous|None),
+    где previous — прошлая запись по маршруту (до этой проверки), нужная, чтобы
+    показать изменение цены.
     """
+    repo: Repository = config["db"]
     items: list[tuple[dict, dict | None, dict | None]] = []
-    with storage.connect() as conn:
-        for route in storage.get_active_routes(conn):
-            record = fetch_price(config, route)
-            previous = None
-            if record is not None:
-                previous = storage.get_last_price(
-                    conn, route["origin"], route["destination"], route["depart_date"]
-                )
-                # /check вызывают часто; пишем точку в историю только если цена
-                # изменилась — иначе плодятся плоские дубли (регулярную выборку
-                # каждые 12 ч обеспечивает плановая джоба, а не эта команда).
-                if previous is None or previous["price"] != record["price"]:
-                    storage.save_price(conn, record)
-            items.append((route, record, previous))
+    for route in repo.get_active_routes():
+        record = fetch_price(config, route)
+        previous = None
+        if record is not None:
+            previous = repo.get_last_price(
+                route["origin"], route["destination"], route["depart_date"]
+            )
+            # /check вызывают часто; пишем точку в историю только если цена
+            # изменилась — иначе плодятся плоские дубли (регулярную выборку
+            # обеспечивает плановая джоба, а не эта команда).
+            if previous is None or previous["price"] != record["price"]:
+                repo.save_price(record)
+        items.append((route, record, previous))
     return items
 
 
-def build_chart_png() -> bytes | None:
-    """Синхронно собрать историю по всем маршрутам из БД и построить график.
+def build_chart_png(repo: Repository) -> bytes | None:
+    """Собрать историю по всем маршрутам из БД и построить график.
 
-    Соединение SQLite создаётся и используется в одном потоке. Возвращает PNG
-    в байтах или None, если истории нет вовсе. Импорт chart ленивый — matplotlib
-    тяжёлый и не нужен для остальных режимов.
+    Возвращает PNG в байтах или None, если истории нет вовсе. Импорт chart
+    ленивый — matplotlib тяжёлый и не нужен для остальных режимов.
     """
     from flight_monitor import chart
 
-    with storage.connect() as conn:
-        series = [
-            (route, storage.get_route_series(
-                conn, route["origin"], route["destination"], route["depart_date"]
-            ))
-            for route in storage.get_active_routes(conn)
-        ]
+    series = [
+        (route, repo.get_route_series(
+            route["origin"], route["destination"], route["depart_date"]
+        ))
+        for route in repo.get_active_routes()
+    ]
     return chart.render_price_chart(series)

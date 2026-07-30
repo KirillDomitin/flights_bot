@@ -11,14 +11,16 @@ import sys
 
 from flight_monitor import config as config_module
 from flight_monitor.core import monitoring
+from flight_monitor.repository import storage
 
 logger = logging.getLogger("flight_monitor")
 
 
 def main() -> None:
     config_module.setup_logging()
-    # Засеять маршруты по умолчанию при первом запуске (для всех режимов).
-    monitoring.ensure_seeded()
+    # Репозиторий для режимов без .env (--history/--chart) и первичного сидирования.
+    repo = storage.build_repository()
+    monitoring.ensure_seeded(repo)
 
     parser = argparse.ArgumentParser(description="Мониторинг цен на авиабилеты")
     parser.add_argument(
@@ -42,11 +44,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.history:
-        monitoring.show_history()
+        monitoring.show_history(repo)
         return
 
     if args.chart:
-        png = monitoring.build_chart_png()
+        png = monitoring.build_chart_png(repo)
         if png is None:
             print("Нет истории цен для графика.")
             return

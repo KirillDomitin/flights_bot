@@ -1,4 +1,14 @@
-"""Хранение истории цен в SQLite."""
+"""Хранение цен и маршрутов.
+
+Абстракция `Repository` отделяет остальной код от конкретной БД (сейчас SQLite),
+как `Cache` — от Redis (см. [[cache.py]]). `monitor`/`bot` знают только методы
+репозитория, а не тип базы; за интерфейсом можно держать другой бэкенд.
+
+Каждый метод открывает собственное короткоживущее соединение: соединение SQLite
+нельзя переиспользовать между потоками, а операции идут и из event loop бота, и из
+worker-потоков (`asyncio.to_thread`). Поэтому один экземпляр `SqliteRepository`
+потокобезопасен — общего соединения между потоками нет.
+"""
 from __future__ import annotations
 
 import logging
@@ -6,12 +16,12 @@ import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
-# По умолчанию БД лежит в корне репозитория (рядом с monitor.py). Модуль теперь
-# в flight_monitor/repository/, поэтому корень — на два уровня выше.
+# По умолчанию БД лежит в корне репозитория (рядом с monitor.py). Модуль в
+# flight_monitor/repository/, поэтому корень — на два уровня выше.
 # Путь можно переопределить через MONITOR_DB_PATH (в Docker — том вне образа).
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = Path(os.getenv("MONITOR_DB_PATH") or _REPO_ROOT / "prices.db")
@@ -57,192 +67,165 @@ def _route_row_to_dict(row: sqlite3.Row) -> dict:
     }
 
 
-def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Открыть соединение с БД и убедиться, что схема создана."""
-    db_path = Path(db_path)
-    if db_path.parent and not db_path.parent.exists():
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    return conn
+class Repository(Protocol):
+    """Интерфейс хранилища цен и маршрутов (без утечки соединения БД наружу)."""
+
+    def get_last_price(self, origin: str, destination: str, depart_date: str) -> Optional[dict]: ...
+    def save_price(self, record: dict) -> None: ...
+    def get_history(self, origin: Optional[str] = None, destination: Optional[str] = None, limit: int = 50) -> list[dict]: ...
+    def get_route_series(self, origin: str, destination: str, depart_date: str, limit: int = 200) -> list[dict]: ...
+    def get_active_routes(self) -> list[dict]: ...
+    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, added_by: Optional[str] = None) -> Optional[int]: ...
+    def remove_route(self, route_id: int) -> bool: ...
+    def seed_routes(self, default_routes: list[dict]) -> None: ...
 
 
-@contextmanager
-def connect(db_path: Path = DB_PATH) -> Iterator[sqlite3.Connection]:
-    """Контекстный менеджер: открыть соединение и гарантированно его закрыть.
+class SqliteRepository:
+    """Реализация `Repository` на SQLite. Каждая операция — своё соединение."""
 
-    Соединение SQLite нужно создавать и использовать в одном потоке, поэтому
-    в фоновых задачах оборачиваем весь блок работы с БД в этот менеджер.
-    """
-    conn = get_connection(db_path)
-    try:
-        yield conn
-    finally:
-        conn.close()
+    def __init__(self, db_path: Path = DB_PATH) -> None:
+        self._db_path = Path(db_path)
 
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        path = self._db_path
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(path, timeout=10)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            yield conn
+        finally:
+            conn.close()
 
-def get_last_price(
-    conn: sqlite3.Connection,
-    origin: str,
-    destination: str,
-    depart_date: str,
-) -> Optional[dict]:
-    """Вернуть последнюю сохранённую запись по маршруту или None."""
-    row = conn.execute(
-        """
-        SELECT * FROM prices
-        WHERE origin = ? AND destination = ? AND depart_date = ?
-        ORDER BY ts DESC, id DESC
-        LIMIT 1
-        """,
-        (origin, destination, depart_date),
-    ).fetchone()
-    return dict(row) if row else None
+    # --- Цены ---
 
+    def get_last_price(self, origin: str, destination: str, depart_date: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM prices
+                WHERE origin = ? AND destination = ? AND depart_date = ?
+                ORDER BY ts DESC, id DESC LIMIT 1
+                """,
+                (origin, destination, depart_date),
+            ).fetchone()
+        return dict(row) if row else None
 
-def save_price(conn: sqlite3.Connection, record: dict) -> None:
-    """Сохранить запись о цене в БД."""
-    conn.execute(
-        """
-        INSERT INTO prices
-            (origin, destination, depart_date, price,
-             airline, flight_number, link, currency)
-        VALUES (:origin, :destination, :depart_date, :price,
-                :airline, :flight_number, :link, :currency)
-        """,
-        {
-            "origin": record["origin"],
-            "destination": record["destination"],
-            "depart_date": record["depart_date"],
-            "price": record["price"],
-            "airline": record.get("airline"),
-            "flight_number": record.get("flight_number"),
-            "link": record.get("link"),
-            "currency": record.get("currency"),
-        },
-    )
-    conn.commit()
-    logger.info(
-        "Сохранена цена %s→%s %s: %s %s",
-        record["origin"],
-        record["destination"],
-        record["depart_date"],
-        record["price"],
-        record.get("currency", ""),
-    )
-
-
-def get_history(
-    conn: sqlite3.Connection,
-    origin: Optional[str] = None,
-    destination: Optional[str] = None,
-    limit: int = 50,
-) -> list[dict]:
-    """Вернуть историю цен (опционально по конкретному маршруту)."""
-    query = "SELECT * FROM prices"
-    params: list = []
-    if origin and destination:
-        query += " WHERE origin = ? AND destination = ?"
-        params.extend([origin, destination])
-    query += " ORDER BY ts DESC, id DESC LIMIT ?"
-    params.append(limit)
-    rows = conn.execute(query, params).fetchall()
-    return [dict(row) for row in rows]
-
-
-def get_route_series(
-    conn: sqlite3.Connection,
-    origin: str,
-    destination: str,
-    depart_date: str,
-    limit: int = 200,
-) -> list[dict]:
-    """Вернуть историю цен по конкретному маршруту в хронологическом порядке
-    (по возрастанию времени) — для построения графика."""
-    rows = conn.execute(
-        """
-        SELECT * FROM prices
-        WHERE origin = ? AND destination = ? AND depart_date = ?
-        ORDER BY ts ASC, id ASC
-        LIMIT ?
-        """,
-        (origin, destination, depart_date, limit),
-    ).fetchall()
-    return [dict(row) for row in rows]
-
-
-# --- Отслеживаемые маршруты (таблица routes) ---
-
-def get_active_routes(conn: sqlite3.Connection) -> list[dict]:
-    """Вернуть активные отслеживаемые маршруты (в порядке добавления)."""
-    rows = conn.execute(
-        "SELECT * FROM routes WHERE active = 1 ORDER BY id ASC"
-    ).fetchall()
-    return [_route_row_to_dict(row) for row in rows]
-
-
-def add_route(
-    conn: sqlite3.Connection,
-    origin: str,
-    destination: str,
-    depart_date: str,
-    direct_only: bool = True,
-    added_by: Optional[str] = None,
-) -> Optional[int]:
-    """Добавить маршрут в отслеживаемые. Вернуть id новой записи, либо None,
-    если такой маршрут уже есть (UNIQUE). Если он был деактивирован — включает
-    обратно."""
-    cur = conn.execute(
-        """
-        INSERT INTO routes (origin, destination, depart_date, direct_only, added_by)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT (origin, destination, depart_date, direct_only)
-        DO UPDATE SET active = 1
-        """,
-        (origin, destination, depart_date, int(direct_only), added_by),
-    )
-    conn.commit()
-    row = conn.execute(
-        """
-        SELECT id FROM routes
-        WHERE origin = ? AND destination = ? AND depart_date = ? AND direct_only = ?
-        """,
-        (origin, destination, depart_date, int(direct_only)),
-    ).fetchone()
-    logger.info(
-        "Добавлен маршрут %s→%s %s (%s)",
-        origin, destination, depart_date,
-        "прямой" if direct_only else "с пересадками",
-    )
-    return row["id"] if row else None
-
-
-def remove_route(conn: sqlite3.Connection, route_id: int) -> bool:
-    """Убрать маршрут из мониторинга (active = 0). История цен в prices остаётся.
-    Вернуть True, если строка была затронута."""
-    cur = conn.execute(
-        "UPDATE routes SET active = 0 WHERE id = ? AND active = 1", (route_id,)
-    )
-    conn.commit()
-    if cur.rowcount:
-        logger.info("Маршрут id=%s убран из мониторинга", route_id)
-    return bool(cur.rowcount)
-
-
-def seed_routes(conn: sqlite3.Connection, default_routes: list[dict]) -> None:
-    """Заполнить таблицу routes маршрутами по умолчанию, если она пуста
-    (первый запуск). Идемпотентно: при непустой таблице ничего не делает."""
-    count = conn.execute("SELECT COUNT(*) AS n FROM routes").fetchone()["n"]
-    if count:
-        return
-    for route in default_routes:
-        add_route(
-            conn,
-            route["origin"],
-            route["destination"],
-            route["depart_date"],
-            route.get("direct_only", True),
+    def save_price(self, record: dict) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO prices
+                    (origin, destination, depart_date, price,
+                     airline, flight_number, link, currency)
+                VALUES (:origin, :destination, :depart_date, :price,
+                        :airline, :flight_number, :link, :currency)
+                """,
+                {
+                    "origin": record["origin"],
+                    "destination": record["destination"],
+                    "depart_date": record["depart_date"],
+                    "price": record["price"],
+                    "airline": record.get("airline"),
+                    "flight_number": record.get("flight_number"),
+                    "link": record.get("link"),
+                    "currency": record.get("currency"),
+                },
+            )
+            conn.commit()
+        logger.info(
+            "Сохранена цена %s→%s %s: %s %s",
+            record["origin"], record["destination"], record["depart_date"],
+            record["price"], record.get("currency", ""),
         )
-    logger.info("Таблица routes засеяна маршрутами по умолчанию (%d)", len(default_routes))
+
+    def get_history(self, origin: Optional[str] = None, destination: Optional[str] = None, limit: int = 50) -> list[dict]:
+        query = "SELECT * FROM prices"
+        params: list = []
+        if origin and destination:
+            query += " WHERE origin = ? AND destination = ?"
+            params.extend([origin, destination])
+        query += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_route_series(self, origin: str, destination: str, depart_date: str, limit: int = 200) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM prices
+                WHERE origin = ? AND destination = ? AND depart_date = ?
+                ORDER BY ts ASC, id ASC LIMIT ?
+                """,
+                (origin, destination, depart_date, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # --- Маршруты ---
+
+    def get_active_routes(self) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM routes WHERE active = 1 ORDER BY id ASC"
+            ).fetchall()
+        return [_route_row_to_dict(row) for row in rows]
+
+    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, added_by: Optional[str] = None) -> Optional[int]:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO routes (origin, destination, depart_date, direct_only, added_by)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (origin, destination, depart_date, direct_only)
+                DO UPDATE SET active = 1
+                """,
+                (origin, destination, depart_date, int(direct_only), added_by),
+            )
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT id FROM routes
+                WHERE origin = ? AND destination = ? AND depart_date = ? AND direct_only = ?
+                """,
+                (origin, destination, depart_date, int(direct_only)),
+            ).fetchone()
+        logger.info(
+            "Добавлен маршрут %s→%s %s (%s)",
+            origin, destination, depart_date,
+            "прямой" if direct_only else "с пересадками",
+        )
+        return row["id"] if row else None
+
+    def remove_route(self, route_id: int) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE routes SET active = 0 WHERE id = ? AND active = 1", (route_id,)
+            )
+            conn.commit()
+            affected = cur.rowcount
+        if affected:
+            logger.info("Маршрут id=%s убран из мониторинга", route_id)
+        return bool(affected)
+
+    def seed_routes(self, default_routes: list[dict]) -> None:
+        with self._connect() as conn:
+            count = conn.execute("SELECT COUNT(*) AS n FROM routes").fetchone()["n"]
+        if count:
+            return
+        for route in default_routes:
+            self.add_route(
+                route["origin"], route["destination"], route["depart_date"],
+                route.get("direct_only", True),
+            )
+        logger.info("Таблица routes засеяна маршрутами по умолчанию (%d)", len(default_routes))
+
+
+def build_repository(db_path: Optional[Path] = None) -> Repository:
+    """Создать репозиторий. Сейчас только SQLite; за интерфейсом `Repository`
+    можно добавить другой бэкенд (например, Postgres), не трогая вызывающий код."""
+    return SqliteRepository(db_path or DB_PATH)

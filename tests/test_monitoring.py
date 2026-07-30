@@ -44,13 +44,12 @@ def _record(price: int) -> dict:
 
 class CheckRouteTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Отдельная временная БД на каждый тест
+        # Отдельный репозиторий на временной БД для каждого теста
         self._tmp = tempfile.TemporaryDirectory()
         db_path = Path(self._tmp.name) / "test.db"
-        self.conn = storage.get_connection(db_path)
+        self.repo = storage.SqliteRepository(db_path)
 
     def tearDown(self) -> None:
-        self.conn.close()
         self._tmp.cleanup()
 
     def _run(self, price: int) -> str | None:
@@ -58,19 +57,19 @@ class CheckRouteTests(unittest.TestCase):
         with mock.patch.object(
             monitoring.api_client, "fetch_price", return_value=_record(price)
         ):
-            return monitoring.check_route(self.conn, _CONFIG, _ROUTE)
+            return monitoring.check_route(self.repo, _CONFIG, _ROUTE)
 
     def test_first_run_notifies_and_saves(self) -> None:
         message = self._run(42100)
         self.assertIsNotNone(message)  # первый запуск → уведомление
-        last = storage.get_last_price(self.conn, "MOW", "PEK", "2025-09-22")
+        last = self.repo.get_last_price("MOW", "PEK", "2025-09-22")
         self.assertEqual(last["price"], 42100)
 
     def test_price_drop_notifies(self) -> None:
         self._run(42100)                 # первичная запись
         message = self._run(38500)       # цена ниже
         self.assertIsNotNone(message)
-        last = storage.get_last_price(self.conn, "MOW", "PEK", "2025-09-22")
+        last = self.repo.get_last_price("MOW", "PEK", "2025-09-22")
         self.assertEqual(last["price"], 38500)
 
     def test_price_same_does_not_notify(self) -> None:
@@ -81,18 +80,16 @@ class CheckRouteTests(unittest.TestCase):
         self._run(42100)
         message = self._run(45000)
         self.assertIsNone(message)
-        last = storage.get_last_price(self.conn, "MOW", "PEK", "2025-09-22")
+        last = self.repo.get_last_price("MOW", "PEK", "2025-09-22")
         self.assertEqual(last["price"], 45000)
 
     def test_api_none_skips_everything(self) -> None:
         with mock.patch.object(
             monitoring.api_client, "fetch_price", return_value=None
         ):
-            message = monitoring.check_route(self.conn, _CONFIG, _ROUTE)
+            message = monitoring.check_route(self.repo, _CONFIG, _ROUTE)
         self.assertIsNone(message)
-        self.assertIsNone(
-            storage.get_last_price(self.conn, "MOW", "PEK", "2025-09-22")
-        )
+        self.assertIsNone(self.repo.get_last_price("MOW", "PEK", "2025-09-22"))
 
 
 class MessageFormatTests(unittest.TestCase):
@@ -243,44 +240,43 @@ class RoutesTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         db_path = Path(self._tmp.name) / "test.db"
-        self.conn = storage.get_connection(db_path)
+        self.repo = storage.SqliteRepository(db_path)
 
     def tearDown(self) -> None:
-        self.conn.close()
         self._tmp.cleanup()
 
     def test_seed_fills_empty_then_idempotent(self) -> None:
-        self.assertEqual(storage.get_active_routes(self.conn), [])
-        storage.seed_routes(self.conn, config.DEFAULT_ROUTES)
-        routes = storage.get_active_routes(self.conn)
+        self.assertEqual(self.repo.get_active_routes(), [])
+        self.repo.seed_routes(config.DEFAULT_ROUTES)
+        routes = self.repo.get_active_routes()
         self.assertEqual(len(routes), len(config.DEFAULT_ROUTES))
         self.assertEqual(routes[0]["origin"], "MOW")
         self.assertTrue(routes[0]["direct_only"])
         # повторный сид ничего не добавляет
-        storage.seed_routes(self.conn, config.DEFAULT_ROUTES)
-        self.assertEqual(len(storage.get_active_routes(self.conn)), len(config.DEFAULT_ROUTES))
+        self.repo.seed_routes(config.DEFAULT_ROUTES)
+        self.assertEqual(len(self.repo.get_active_routes()), len(config.DEFAULT_ROUTES))
 
     def test_add_and_remove_route(self) -> None:
-        rid = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=False)
+        rid = self.repo.add_route("LED", "AER", "2026-10-01", direct_only=False)
         self.assertIsNotNone(rid)
-        routes = storage.get_active_routes(self.conn)
+        routes = self.repo.get_active_routes()
         self.assertEqual(len(routes), 1)
         self.assertEqual(routes[0]["destination"], "AER")
         self.assertFalse(routes[0]["direct_only"])
         # удаление → пропадает из активных
-        self.assertTrue(storage.remove_route(self.conn, rid))
-        self.assertEqual(storage.get_active_routes(self.conn), [])
+        self.assertTrue(self.repo.remove_route(rid))
+        self.assertEqual(self.repo.get_active_routes(), [])
         # повторное удаление уже неактивного → False
-        self.assertFalse(storage.remove_route(self.conn, rid))
+        self.assertFalse(self.repo.remove_route(rid))
 
     def test_add_duplicate_reactivates(self) -> None:
-        rid = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=True)
-        storage.remove_route(self.conn, rid)
-        self.assertEqual(storage.get_active_routes(self.conn), [])
+        rid = self.repo.add_route("LED", "AER", "2026-10-01", direct_only=True)
+        self.repo.remove_route(rid)
+        self.assertEqual(self.repo.get_active_routes(), [])
         # тот же маршрут снова → включается обратно, без дублей
-        rid2 = storage.add_route(self.conn, "LED", "AER", "2026-10-01", direct_only=True)
+        rid2 = self.repo.add_route("LED", "AER", "2026-10-01", direct_only=True)
         self.assertEqual(rid2, rid)
-        self.assertEqual(len(storage.get_active_routes(self.conn)), 1)
+        self.assertEqual(len(self.repo.get_active_routes()), 1)
 
 
 class _FakeResp:

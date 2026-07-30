@@ -22,7 +22,6 @@ from telegram.ext import (
 )
 
 from flight_monitor import notifier
-from flight_monitor.repository import storage
 from flight_monitor.sources import places
 
 logger = logging.getLogger(__name__)
@@ -122,8 +121,7 @@ async def menu_list(update, context) -> None:
     """Callback menu:list — показать маршруты с кнопками удаления."""
     query = update.callback_query
     await query.answer()
-    with storage.connect() as conn:
-        routes = storage.get_active_routes(conn)
+    routes = context.bot_data["config"]["db"].get_active_routes()
     await query.edit_message_text(_list_text(routes), reply_markup=_routes_markup(routes))
 
 
@@ -131,9 +129,9 @@ async def route_del(update, context) -> None:
     """Callback route:del:<id> — убрать маршрут и обновить список."""
     query = update.callback_query
     route_id = int(query.data.split(":")[2])
-    with storage.connect() as conn:
-        removed = storage.remove_route(conn, route_id)
-        routes = storage.get_active_routes(conn)
+    repo = context.bot_data["config"]["db"]
+    removed = repo.remove_route(route_id)
+    routes = repo.get_active_routes()
     await query.answer("Удалено" if removed else "Уже удалён")
     await query.edit_message_text(_list_text(routes), reply_markup=_routes_markup(routes))
 
@@ -260,11 +258,10 @@ async def confirm_yes(update, context) -> int:
     nr = context.user_data["new_route"]
     user = update.effective_user
     added_by = (user.username or user.first_name) if user else None
-    with storage.connect() as conn:
-        storage.add_route(
-            conn, nr["origin"], nr["destination"], nr["depart_date"],
-            nr.get("direct_only", True), added_by=added_by,
-        )
+    context.bot_data["config"]["db"].add_route(
+        nr["origin"], nr["destination"], nr["depart_date"],
+        nr.get("direct_only", True), added_by=added_by,
+    )
     typ = "прямой" if nr.get("direct_only", True) else "с пересадками"
     await query.edit_message_text(
         f"✅ Добавлено: {nr['origin']} → {nr['destination']} · "

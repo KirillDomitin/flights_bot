@@ -12,6 +12,7 @@ import sys
 from dotenv import load_dotenv
 
 from flight_monitor.repository import cache as cache_module
+from flight_monitor.repository import storage
 
 # Маршруты по умолчанию — ими сидится таблица routes при первом запуске
 # (open-jaw: MOW→PEK 22.09, SHA→MOW 30.09; оба — только прямые рейсы).
@@ -82,4 +83,6 @@ def load_config() -> dict:
 
     # Кэш (Redis) — best-effort; None, если REDIS_URL не задан
     config["cache"] = cache_module.build_cache(config["redis_url"])
+    # Хранилище (сейчас SQLite) за интерфейсом Repository
+    config["db"] = storage.build_repository()
     return config

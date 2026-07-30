@@ -19,9 +19,9 @@ async def _fetch_current_prices(config: dict) -> list[tuple[dict, dict | None]]:
     return await asyncio.to_thread(monitoring.fetch_current_prices, config)
 
 
-async def _render_chart() -> bytes | None:
+async def _render_chart(repo) -> bytes | None:
     """Построение графика в отдельном потоке (не блокируем event loop)."""
-    return await asyncio.to_thread(monitoring.build_chart_png)
+    return await asyncio.to_thread(monitoring.build_chart_png, repo)
 
 
 async def cmd_start(update, context) -> None:
@@ -62,7 +62,7 @@ async def cmd_chart(update, context) -> None:
 
     await update.message.reply_text("Строю график…")
     try:
-        png = await _render_chart()
+        png = await _render_chart(config["db"])
         if png is None:
             await update.message.reply_text(
                 "Пока нет истории цен для графика — данные появятся после проверок."
