@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from flight_monitor import chart, config, notifier
+from flight_monitor.bot import app as bot_app
 from flight_monitor.bot import menu
 from flight_monitor.core import monitoring
 from flight_monitor.repository import cache, storage
@@ -326,6 +327,45 @@ class CalendarTests(unittest.TestCase):
         today = date.today()
         markup = menu._calendar_markup(today.year, today.month)
         self.assertEqual(markup.inline_keyboard[0][0].callback_data, "cal:ignore")
+
+
+class WebhookConfigTests(unittest.TestCase):
+    def test_default_mode_is_polling(self) -> None:
+        s = config.build_webhook_settings({})
+        self.assertEqual(s["bot_mode"], "polling")
+        self.assertEqual(s["webhook_port"], config.DEFAULT_WEBHOOK_PORT)
+
+    def test_unknown_mode_raises(self) -> None:
+        with self.assertRaises(SystemExit):
+            config.build_webhook_settings({"BOT_MODE": "carrier-pigeon"})
+
+    def test_webhook_mode_requires_url_and_secret(self) -> None:
+        with self.assertRaises(SystemExit):
+            config.build_webhook_settings({"BOT_MODE": "webhook"})
+        with self.assertRaises(SystemExit):  # только URL, без секрета — тоже ошибка
+            config.build_webhook_settings(
+                {"BOT_MODE": "webhook", "WEBHOOK_URL": "https://x/y"}
+            )
+
+    def test_webhook_mode_full(self) -> None:
+        s = config.build_webhook_settings({
+            "BOT_MODE": "Webhook",           # регистр не важен
+            "WEBHOOK_URL": " https://flights.example.com/hook ",  # обрезаем пробелы
+            "WEBHOOK_SECRET": "s3cr3t",
+            "WEBHOOK_PORT": "9000",
+        })
+        self.assertEqual(s["bot_mode"], "webhook")
+        self.assertEqual(s["webhook_url"], "https://flights.example.com/hook")
+        self.assertEqual(s["webhook_secret"], "s3cr3t")
+        self.assertEqual(s["webhook_port"], 9000)
+
+    def test_webhook_path_derived_from_url(self) -> None:
+        self.assertEqual(
+            bot_app._webhook_path("https://flights.example.com/abc123"), "abc123"
+        )
+        self.assertEqual(
+            bot_app._webhook_path("https://flights.example.com/"), ""
+        )
 
 
 class ChartTests(unittest.TestCase):

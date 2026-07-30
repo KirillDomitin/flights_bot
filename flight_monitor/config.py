@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from typing import Mapping
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,49 @@ CHECK_HOURS = (3, 9, 15, 21)
 # Источник цен по умолчанию: "browser" — парсинг Aviasales через Playwright
 # (актуальные цены), "api" — кэш Travelpayouts Data API (быстрее, но устаревает).
 DEFAULT_PRICE_SOURCE = "browser"
+
+# Способ получения апдейтов от Telegram:
+#   polling — long-polling (исходящие соединения, работает за NAT, по умолчанию)
+#   webhook — Telegram шлёт апдейты на публичный HTTPS-эндпоинт (нужен ingress)
+DEFAULT_BOT_MODE = "polling"
+BOT_MODES = ("polling", "webhook")
+# Порт встроенного webhook-сервера внутри контейнера (наружу TLS даёт Cloudflare)
+DEFAULT_WEBHOOK_PORT = 8443
+
+
+def build_webhook_settings(env: Mapping[str, str]) -> dict:
+    """Разобрать настройки режима бота из окружения.
+
+    Возвращает {bot_mode, webhook_url, webhook_secret, webhook_port}.
+    Падает с понятной ошибкой, если BOT_MODE неизвестен или webhook-режим
+    выбран без обязательных WEBHOOK_URL/WEBHOOK_SECRET. Чистая функция (без
+    os.environ напрямую) — чтобы тестировать без .env.
+    """
+    mode = (env.get("BOT_MODE") or DEFAULT_BOT_MODE).strip().lower()
+    if mode not in BOT_MODES:
+        raise SystemExit(
+            f"BOT_MODE должен быть одним из {', '.join(BOT_MODES)}, а не {mode!r}."
+        )
+
+    settings = {
+        "bot_mode": mode,
+        "webhook_url": (env.get("WEBHOOK_URL") or "").strip(),
+        "webhook_secret": (env.get("WEBHOOK_SECRET") or "").strip(),
+        "webhook_port": int(env.get("WEBHOOK_PORT") or DEFAULT_WEBHOOK_PORT),
+    }
+
+    if mode == "webhook":
+        missing = [
+            name
+            for name, key in (("WEBHOOK_URL", "webhook_url"), ("WEBHOOK_SECRET", "webhook_secret"))
+            if not settings[key]
+        ]
+        if missing:
+            raise SystemExit(
+                "BOT_MODE=webhook требует переменные: " + ", ".join(missing) + "."
+            )
+
+    return settings
 
 
 def setup_logging() -> None:
@@ -80,6 +124,10 @@ def load_config() -> dict:
             + ", ".join(name.upper() for name in missing)
             + ". Скопируйте .env.example в .env и заполните."
         )
+
+    # Режим бота (polling/webhook) + параметры webhook — валидируется здесь,
+    # чтобы упасть на старте, а не в момент запуска бота.
+    config.update(build_webhook_settings(os.environ))
 
     # Кэш (Redis) — best-effort; None, если REDIS_URL не задан
     config["cache"] = cache_module.build_cache(config["redis_url"])

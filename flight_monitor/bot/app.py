@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dtm
 import logging
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from telegram.ext import Application, CommandHandler, Defaults
@@ -11,6 +12,15 @@ from flight_monitor.bot import handlers, menu
 from flight_monitor.config import CHECK_HOURS
 
 logger = logging.getLogger(__name__)
+
+# callback_query нужен для inline-кнопок мастера /menu
+_ALLOWED_UPDATES = ["message", "callback_query"]
+
+
+def _webhook_path(webhook_url: str) -> str:
+    """Путь для встроенного webhook-сервера — берём из WEBHOOK_URL, чтобы
+    url_path и публичный адрес не разъезжались (единый источник правды)."""
+    return urlparse(webhook_url).path.lstrip("/")
 
 
 def run_bot(config: dict) -> None:
@@ -42,8 +52,27 @@ def run_bot(config: dict) -> None:
         times = ", ".join(f"{h:02d}:00" for h in CHECK_HOURS)
         logger.info("Плановые проверки включены: %s (Europe/Moscow).", times)
 
+    if config.get("bot_mode") == "webhook":
+        path = _webhook_path(config["webhook_url"])
+        logger.info(
+            "Бот запущен (webhook): слушаю :%s, публичный адрес %s",
+            config["webhook_port"], config["webhook_url"],
+        )
+        # TLS терминирует Cloudflare (туннель ходит к origin по HTTP) — cert/key
+        # тут не нужны. secret_token отсекает фейковые апдейты мимо туннеля.
+        # drop_pending_updates — чистый старт при переключении с polling.
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=config["webhook_port"],
+            url_path=path,
+            secret_token=config["webhook_secret"],
+            webhook_url=config["webhook_url"],
+            allowed_updates=_ALLOWED_UPDATES,
+            drop_pending_updates=True,
+        )
+        return
+
     logger.info(
         "Бот запущен (polling). /check@ИмяБота — запросить цены. Ctrl+C для выхода."
     )
-    # callback_query нужен для inline-кнопок мастера /menu
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    application.run_polling(allowed_updates=_ALLOWED_UPDATES)
