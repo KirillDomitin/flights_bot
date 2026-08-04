@@ -48,12 +48,29 @@ CREATE TABLE IF NOT EXISTS routes (
     destination  TEXT    NOT NULL,
     depart_date  TEXT    NOT NULL,
     direct_only  INTEGER NOT NULL DEFAULT 1,
+    stops_wanted INTEGER NOT NULL DEFAULT 0,
+    passengers   INTEGER NOT NULL DEFAULT 1,
     added_by     TEXT,
     created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
     active       INTEGER NOT NULL DEFAULT 1,
     UNIQUE (origin, destination, depart_date, direct_only)
 );
 """
+
+# Колонки, добавленные после первой версии схемы. Для уже существующих БД (прод)
+# CREATE TABLE IF NOT EXISTS их не добавит — накатываем ALTER-ом при подключении.
+_ROUTE_MIGRATIONS = {
+    "stops_wanted": "ALTER TABLE routes ADD COLUMN stops_wanted INTEGER NOT NULL DEFAULT 0",
+    "passengers": "ALTER TABLE routes ADD COLUMN passengers INTEGER NOT NULL DEFAULT 1",
+}
+
+
+def _migrate_routes(conn: sqlite3.Connection) -> None:
+    """Догнать схему routes недостающими колонками (идемпотентно)."""
+    have = {row["name"] for row in conn.execute("PRAGMA table_info(routes)")}
+    for column, ddl in _ROUTE_MIGRATIONS.items():
+        if column not in have:
+            conn.execute(ddl)
 
 
 def _route_row_to_dict(row: sqlite3.Row) -> dict:
@@ -64,6 +81,8 @@ def _route_row_to_dict(row: sqlite3.Row) -> dict:
         "destination": row["destination"],
         "depart_date": row["depart_date"],
         "direct_only": bool(row["direct_only"]),
+        "stops_wanted": row["stops_wanted"],
+        "passengers": row["passengers"],
     }
 
 
@@ -75,7 +94,7 @@ class Repository(Protocol):
     def get_history(self, origin: Optional[str] = None, destination: Optional[str] = None, limit: int = 50) -> list[dict]: ...
     def get_route_series(self, origin: str, destination: str, depart_date: str, limit: int = 200) -> list[dict]: ...
     def get_active_routes(self) -> list[dict]: ...
-    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, added_by: Optional[str] = None) -> Optional[int]: ...
+    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, stops_wanted: int = 0, passengers: int = 1, added_by: Optional[str] = None) -> Optional[int]: ...
     def remove_route(self, route_id: int) -> bool: ...
     def seed_routes(self, default_routes: list[dict]) -> None: ...
 
@@ -95,6 +114,7 @@ class SqliteRepository:
         conn.row_factory = sqlite3.Row
         try:
             conn.executescript(_SCHEMA)
+            _migrate_routes(conn)
             conn.commit()
             yield conn
         finally:
@@ -175,16 +195,23 @@ class SqliteRepository:
             ).fetchall()
         return [_route_row_to_dict(row) for row in rows]
 
-    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, added_by: Optional[str] = None) -> Optional[int]:
+    def add_route(self, origin: str, destination: str, depart_date: str, direct_only: bool = True, stops_wanted: int = 0, passengers: int = 1, added_by: Optional[str] = None) -> Optional[int]:
+        # UNIQUE — по (origin, destination, depart_date, direct_only); повторное
+        # добавление того же маршрута реактивирует его и обновляет число пересадок
+        # и пассажиров (последний выбор пользователя выигрывает).
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO routes (origin, destination, depart_date, direct_only, added_by)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO routes
+                    (origin, destination, depart_date, direct_only, stops_wanted, passengers, added_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (origin, destination, depart_date, direct_only)
-                DO UPDATE SET active = 1
+                DO UPDATE SET active = 1,
+                              stops_wanted = excluded.stops_wanted,
+                              passengers = excluded.passengers
                 """,
-                (origin, destination, depart_date, int(direct_only), added_by),
+                (origin, destination, depart_date, int(direct_only),
+                 int(stops_wanted), int(passengers), added_by),
             )
             conn.commit()
             row = conn.execute(
@@ -195,9 +222,10 @@ class SqliteRepository:
                 (origin, destination, depart_date, int(direct_only)),
             ).fetchone()
         logger.info(
-            "Добавлен маршрут %s→%s %s (%s)",
+            "Добавлен маршрут %s→%s %s (%s, пассажиров: %d)",
             origin, destination, depart_date,
-            "прямой" if direct_only else "с пересадками",
+            "прямой" if direct_only else f"ровно {stops_wanted} пересадок",
+            passengers,
         )
         return row["id"] if row else None
 
@@ -221,6 +249,8 @@ class SqliteRepository:
             self.add_route(
                 route["origin"], route["destination"], route["depart_date"],
                 route.get("direct_only", True),
+                route.get("stops_wanted", 0),
+                route.get("passengers", 1),
             )
         logger.info("Таблица routes засеяна маршрутами по умолчанию (%d)", len(default_routes))
 

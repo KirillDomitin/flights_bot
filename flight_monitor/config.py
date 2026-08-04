@@ -19,8 +19,8 @@ from flight_monitor.repository import storage
 # (open-jaw: MOW→PEK 22.09, SHA→MOW 30.09; оба — только прямые рейсы).
 # Дальше маршрутами управляют через меню бота, а не через эту константу.
 DEFAULT_ROUTES = [
-    {"origin": "MOW", "destination": "PEK", "depart_date": "2026-09-22", "direct_only": True},
-    {"origin": "SHA", "destination": "MOW", "depart_date": "2026-09-30", "direct_only": True},
+    {"origin": "MOW", "destination": "PEK", "depart_date": "2026-09-22", "direct_only": True, "stops_wanted": 0, "passengers": 1},
+    {"origin": "SHA", "destination": "MOW", "depart_date": "2026-09-30", "direct_only": True, "stops_wanted": 0, "passengers": 1},
 ]
 
 CURRENCY = "rub"
