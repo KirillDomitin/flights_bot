@@ -190,6 +190,12 @@ class CacheTests(unittest.TestCase):
             cache.price_key("browser", route2),
             "price:browser:MOW:PEK:2025-09-22:s1:p2",
         )
+        # legacy «с пересадками» без числа (не-прямой, stops_wanted=0) → sany
+        route_any = dict(_ROUTE, direct_only=False, stops_wanted=0)
+        self.assertEqual(
+            cache.price_key("browser", route_any),
+            "price:browser:MOW:PEK:2025-09-22:sany:p1",
+        )
 
     def test_memory_cache_hit_and_miss(self) -> None:
         c = cache.MemoryCache()
@@ -391,6 +397,13 @@ class ApiExactStopsTests(unittest.TestCase):
             rec = api.fetch_price("t", "MOW", "PEK", "2025-09-22", direct_only=False, stops_wanted=1)
         self.assertIsNone(rec)
 
+    def test_legacy_any_stops_takes_cheapest(self) -> None:
+        # не-прямой + stops_wanted=0 (legacy) → не фильтруем, берём самый дешёвый
+        with mock.patch.object(api.httpx, "get", return_value=_FakeResp(self._payload())):
+            rec = api.fetch_price("t", "MOW", "PEK", "2025-09-22", direct_only=False, stops_wanted=0)
+        self.assertEqual(rec["price"], 12000)   # самый дешёвый из всех
+        self.assertEqual(rec["stops"], 2)        # число пересадок из ответа
+
 
 class CalendarTests(unittest.TestCase):
     def test_future_month_has_selectable_days_and_header(self) -> None:
@@ -462,6 +475,15 @@ class MenuFormatTests(unittest.TestCase):
         })
         self.assertIn("ровно 1 пересадка", line)
         self.assertIn("2 взрослых", line)
+
+    def test_route_line_legacy_any_stops(self) -> None:
+        # не-прямой без точного числа (legacy) → «с пересадками»
+        line = menu._route_line({
+            "origin": "SHA", "destination": "MOW", "depart_date": "2026-08-30",
+            "direct_only": False, "stops_wanted": 0, "passengers": 1,
+        })
+        self.assertIn("с пересадками", line)
+        self.assertNotIn("ровно", line)
 
 
 class ChartTests(unittest.TestCase):

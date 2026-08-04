@@ -200,8 +200,11 @@ def fetch_cheapest(
                 deadline = time.monotonic() + timeout
                 if direct_only:
                     result = _poll_direct(page, deadline)
-                else:
+                elif stops_wanted and stops_wanted > 0:
                     result = _poll_exact_stops(page, deadline, stops_wanted)
+                else:
+                    # legacy «с пересадками» без числа — самый дешёвый с любым
+                    result = _poll_any(page, deadline)
             finally:
                 browser.close()
     except PWTimeout:
@@ -211,7 +214,12 @@ def fetch_cheapest(
         logger.error("Ошибка парсинга Aviasales %s→%s: %s", origin, destination, exc)
         return None
 
-    mode = "прямой" if direct_only else f"ровно {stops_wanted} пересадок"
+    if direct_only:
+        mode = "прямой"
+    elif stops_wanted and stops_wanted > 0:
+        mode = f"ровно {stops_wanted} пересадок"
+    else:
+        mode = "с пересадками"
     if not result:
         logger.info(
             "Нет предложений (%s) %s→%s на %s (за %sс)",
@@ -253,6 +261,24 @@ def _poll_direct(page, deadline: float) -> Optional[dict]:
                 page.wait_for_timeout(4000)
                 found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
                 sel2 = _select(found, direct_only=True)
+                if sel2 and sel2.get("price"):
+                    sel = sel2
+            return sel
+        page.wait_for_timeout(2000)
+    return None
+
+
+def _poll_any(page, deadline: float) -> Optional[dict]:
+    """Legacy-режим «с пересадками» без числа: карточка «Самый дешёвый» (любые
+    пересадки), иначе «Самый дешёвый прямой»."""
+    while time.monotonic() < deadline:
+        found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+        sel = _select(found, direct_only=False)
+        if sel and sel.get("price"):
+            if not sel.get("iata"):
+                page.wait_for_timeout(4000)
+                found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+                sel2 = _select(found, direct_only=False)
                 if sel2 and sel2.get("price"):
                     sel = sel2
             return sel

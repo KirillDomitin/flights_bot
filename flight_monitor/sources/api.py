@@ -84,8 +84,9 @@ def fetch_price(
         logger.info("Нет предложений %s→%s на %s", origin, destination, depart_date)
         return None
 
-    # Для не-прямого оставляем только предложения РОВНО с нужным числом пересадок.
-    if not direct_only:
+    # Не-прямой с точным числом — оставляем предложения РОВНО с N пересадками.
+    # stops_wanted == 0 у не-прямого = legacy «любое число» → не фильтруем.
+    if not direct_only and stops_wanted:
         offers = [o for o in offers if o.get("number_of_changes") == stops_wanted]
         if not offers:
             logger.info(
@@ -101,8 +102,13 @@ def fetch_price(
         logger.info("В предложении отсутствует цена %s→%s", origin, destination)
         return None
 
-    # Число пересадок: для direct — 0; иначе — запрошенное (offers уже отфильтрованы)
-    stops = 0 if direct_only else stops_wanted
+    # Число пересадок: direct → 0; ровно N → N; иначе (любое) — из ответа.
+    if direct_only:
+        stops = 0
+    elif stops_wanted:
+        stops = stops_wanted
+    else:
+        stops = best.get("number_of_changes")
 
     record = {
         "origin": origin,

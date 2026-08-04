@@ -98,10 +98,13 @@ async def menu_back(update, context) -> None:
 
 
 def _stops_text(direct_only: bool, stops_wanted: int) -> str:
-    """Человекочитаемый тип рейса: 'прямой' или 'ровно 1 пересадка'."""
+    """Человекочитаемый тип рейса: 'прямой', 'ровно 1 пересадка' или (legacy,
+    без точного числа) 'с пересадками'."""
     if direct_only:
         return "прямой"
-    return f"ровно {notifier._stops_label(stops_wanted or 0)}"
+    if not stops_wanted:
+        return "с пересадками"
+    return f"ровно {notifier._stops_label(stops_wanted)}"
 
 
 def _route_line(r: dict) -> str:

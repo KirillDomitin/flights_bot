@@ -29,13 +29,17 @@ class Cache(Protocol):
 
 def price_key(source: str, route: dict) -> str:
     """Ключ кэша по маршруту. В ключ входят все параметры, влияющие на цену:
-    источник (browser и api дают разные цены), число пересадок (s0 = прямой,
-    sN = ровно N пересадок) и число пассажиров (pN — цена за всех)."""
-    stops = route.get("stops_wanted", 0)
+    источник (browser и api дают разные цены), тип рейса (s0 = прямой, sN = ровно
+    N пересадок, sany = любое число пересадок) и число пассажиров (pN — за всех)."""
     pax = route.get("passengers", 1)
+    if route.get("direct_only", True):
+        stops = "s0"
+    else:
+        sw = route.get("stops_wanted", 0)
+        stops = f"s{sw}" if sw else "sany"
     return (
         f"price:{source}:{route['origin']}:{route['destination']}:{route['depart_date']}"
-        f":s{stops}:p{pax}"
+        f":{stops}:p{pax}"
     )
 
 
