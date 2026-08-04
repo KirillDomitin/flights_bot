@@ -3,6 +3,6 @@ python-telegram-bot[job-queue,webhooks]>=21.0
 python-dotenv>=1.0
 schedule>=1.2
 tzdata>=2024.1  # база часовых поясов IANA для zoneinfo (нужна на Windows)
-playwright>=1.44  # headless-браузер для парсинга Aviasales (после install: playwright install chromium)
+playwright==1.61.0  # ВЕРСИЯ ДОЛЖНА совпадать с тегом базового образа mcr playwright в Dockerfile (иначе браузер из образа не той ревизии → "Executable doesn't exist")
 matplotlib>=3.8  # построение графика истории цен (команда /chart)
 redis>=5.0  # кэш результатов запроса цены (Redis-бэкенд, включается через REDIS_URL)
