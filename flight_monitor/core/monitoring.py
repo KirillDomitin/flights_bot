@@ -28,8 +28,11 @@ def ensure_seeded(repo: Repository) -> None:
 
 def _fetch_price_uncached(config: dict, route: dict) -> dict | None:
     """Прямой запрос цены из выбранного источника (browser/api), без кэша.
-    Тип рейса (прямой/с пересадками) берётся из маршрута (route['direct_only'])."""
+    Параметры рейса берём из маршрута: direct_only (прямой/с пересадками),
+    stops_wanted (ровно N пересадок при не-прямом) и passengers (взрослые)."""
     direct_only = route.get("direct_only", True)
+    stops_wanted = route.get("stops_wanted", 0)
+    passengers = route.get("passengers", 1)
     if config["price_source"] == "api":
         return api_client.fetch_price(
             token=config["travelpayouts_token"],
@@ -38,12 +41,16 @@ def _fetch_price_uncached(config: dict, route: dict) -> dict | None:
             depart_date=route["depart_date"],
             currency=CURRENCY,
             direct_only=direct_only,
+            stops_wanted=stops_wanted,
+            passengers=passengers,
         )
     return browser_client.fetch_cheapest(
         route["origin"],
         route["destination"],
         route["depart_date"],
         direct_only=direct_only,
+        stops_wanted=stops_wanted,
+        passengers=passengers,
         headless=config["headless"],
     )
 

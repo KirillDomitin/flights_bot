@@ -93,10 +93,52 @@ def _select(found: dict, direct_only: bool) -> Optional[dict]:
     return cheapest or cheap_direct
 
 
-def build_search_url(origin: str, destination: str, depart_date: str) -> str:
-    """Собрать ссылку поиска Aviasales вида MOW2209PEK1 (origin+DDMM+dest+пассажиры)."""
+def build_search_url(origin: str, destination: str, depart_date: str, passengers: int = 1) -> str:
+    """Собрать ссылку поиска Aviasales вида MOW2209PEK1: origin+DDMM+dest+пассажиры.
+    Последняя цифра — число взрослых; цена в выдаче будет за всех пассажиров."""
     dt = datetime.strptime(depart_date, "%Y-%m-%d")
-    return f"https://www.aviasales.ru/search/{origin}{dt.strftime('%d%m')}{destination}1"
+    return f"https://www.aviasales.ru/search/{origin}{dt.strftime('%d%m')}{destination}{max(1, passengers)}"
+
+
+# Экстрактор ВСЕХ карточек рейсов (не только «Самый дешёвый»): нужен, чтобы
+# выбрать самый дешёвый рейс РОВНО с N пересадками. Якорь — логотип авиакомпании
+# (img al_square) в каждой карточке; поднимаемся до карточки с ₽ и «в пути».
+# Цену чистим через \D (убираем любые пробелы-разделители), чтобы не зависеть от
+# конкретных unicode-пробелов.
+_EXTRACT_LIST_JS = r"""() => {
+  const out = [];
+  const seen = new Set();
+  for (const logo of document.querySelectorAll('img[src*="al_square"]')) {
+    let el = logo.parentElement;
+    while (el && el.parentElement &&
+           !(/₽/.test(el.innerText) && /в пути/.test(el.innerText))) {
+      el = el.parentElement;
+    }
+    if (!el) continue;
+    const text = el.innerText;
+    const priceM = text.match(/([\d   ⁠\s]+)₽/);
+    if (!priceM) continue;
+    const price = parseInt(priceM[1].replace(/\D/g, ''), 10);
+    if (!price) continue;
+    let stops = null;
+    const sm = text.match(/в пути[\s\S]{0,40}?(прям|без пересад|(\d+)\s*пересад)/i);
+    if (sm) stops = sm[2] ? parseInt(sm[2], 10) : 0;
+    const am = (logo.src || '').match(/al_square\/([A-Z0-9]{2})/);
+    const key = price + ':' + stops + ':' + (am ? am[1] : '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({price: price, stops: stops, iata: am ? am[1] : null, name: logo.alt || null});
+  }
+  return out;
+}"""
+
+
+def _select_from_list(tickets: list, stops_wanted: int) -> Optional[dict]:
+    """Из всех карточек выбрать самый дешёвый рейс РОВНО с stops_wanted пересадками."""
+    matching = [t for t in tickets if t.get("stops") == stops_wanted and t.get("price")]
+    if not matching:
+        return None
+    return min(matching, key=lambda t: t["price"])
 
 
 def fetch_cheapest(
@@ -105,18 +147,23 @@ def fetch_cheapest(
     depart_date: str,
     *,
     direct_only: bool = True,
+    stops_wanted: int = 0,
+    passengers: int = 1,
     timeout: int = 60,
     headless: bool = True,
 ) -> Optional[dict]:
-    """Вернуть самый дешёвый рейс по маршруту на дату или None (см. _select).
+    """Вернуть самый дешёвый рейс по маршруту на дату или None.
 
-    direct_only=True  — «Самый дешёвый прямой», а если такой карточки нет
-                        (внутренние линии, где дешёвый и так прямой) — «Самый
-                        дешёвый» при условии, что он прямой;
-    direct_only=False — «Самый дешёвый» (может быть с пересадками).
+    direct_only=True  — карточка «Самый дешёвый прямой» (а если её нет на
+                        внутренних линиях — «Самый дешёвый» при условии, что он
+                        прямой);
+    direct_only=False — сканируем ВСЕ карточки рейсов и берём самый дешёвый РОВНО
+                        с stops_wanted пересадками (если таких в выдаче нет — None).
 
-    Открывает страницу поиска в Chromium, опрашивает DOM до появления карточки
-    (или до таймаута). Ошибки браузера не крашат процесс — логируем и вернём None.
+    passengers — число взрослых; уходит в ссылку поиска, цена будет за всех.
+
+    Открывает страницу поиска в Chromium, опрашивает DOM до появления нужного
+    рейса (или до таймаута). Ошибки браузера не крашат процесс — логируем и None.
     """
     # Импортируем внутри функции: playwright не нужен, если выбран API-режим.
     try:
@@ -126,7 +173,7 @@ def fetch_cheapest(
         logger.error("Playwright не установлен. Запустите: playwright install chromium")
         return None
 
-    url = build_search_url(origin, destination, depart_date)
+    url = build_search_url(origin, destination, depart_date, passengers)
     result: Optional[dict] = None
 
     try:
@@ -151,21 +198,10 @@ def fetch_cheapest(
                 page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
 
                 deadline = time.monotonic() + timeout
-                while time.monotonic() < deadline:
-                    found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
-                    sel = _select(found, direct_only)
-                    if sel and sel.get("price"):
-                        # Цена уже есть, но логотип авиакомпании подгружается
-                        # чуть позже — ждём и уточняем, чтобы получить IATA-код.
-                        if not sel.get("iata"):
-                            page.wait_for_timeout(4000)
-                            found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
-                            sel2 = _select(found, direct_only)
-                            if sel2 and sel2.get("price"):
-                                sel = sel2
-                        result = sel
-                        break
-                    page.wait_for_timeout(2000)  # мс
+                if direct_only:
+                    result = _poll_direct(page, deadline)
+                else:
+                    result = _poll_exact_stops(page, deadline, stops_wanted)
             finally:
                 browser.close()
     except PWTimeout:
@@ -175,17 +211,17 @@ def fetch_cheapest(
         logger.error("Ошибка парсинга Aviasales %s→%s: %s", origin, destination, exc)
         return None
 
-    mode = "прямой" if direct_only else "с пересадками"
+    mode = "прямой" if direct_only else f"ровно {stops_wanted} пересадок"
     if not result:
         logger.info(
-            "Нет предложений (%s) %s→%s на %s (карточка не найдена за %sс)",
+            "Нет предложений (%s) %s→%s на %s (за %sс)",
             mode, origin, destination, depart_date, timeout,
         )
         return None
 
     stops = result.get("stops")
     if stops is None:
-        stops = 0 if direct_only else None
+        stops = 0 if direct_only else stops_wanted
     record = {
         "origin": origin,
         "destination": destination,
@@ -194,12 +230,54 @@ def fetch_cheapest(
         "airline": result.get("iata"),
         "flight_number": None,
         "stops": stops,
+        "passengers": passengers,
         "link": url,
         "currency": "rub",
     }
     logger.info(
-        "Aviasales: самый дешёвый (%s) %s→%s: %s ₽ (%s, пересадок: %s)",
+        "Aviasales: (%s) %s→%s: %s ₽ (%s, пересадок: %s, пассажиров: %d)",
         mode, origin, destination, record["price"],
-        result.get("name") or "—", stops if stops is not None else "?",
+        result.get("name") or "—", stops if stops is not None else "?", passengers,
     )
     return record
+
+
+def _poll_direct(page, deadline: float) -> Optional[dict]:
+    """Ждать карточку «Самый дешёвый прямой» (или прямой «Самый дешёвый»)."""
+    while time.monotonic() < deadline:
+        found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+        sel = _select(found, direct_only=True)
+        if sel and sel.get("price"):
+            # Цена есть, но логотип авиакомпании подгружается позже — уточняем IATA.
+            if not sel.get("iata"):
+                page.wait_for_timeout(4000)
+                found = page.evaluate(_EXTRACT_JS, _PROBE_LABELS)
+                sel2 = _select(found, direct_only=True)
+                if sel2 and sel2.get("price"):
+                    sel = sel2
+            return sel
+        page.wait_for_timeout(2000)
+    return None
+
+
+def _poll_exact_stops(page, deadline: float, stops_wanted: int) -> Optional[dict]:
+    """Сканировать все карточки, вернуть самый дешёвый рейс ровно с N пересадками.
+
+    Раз точной карточки у Aviasales нет, ждём появления результатов и подходящего
+    рейса. Если результаты уже прогрузились, но рейса ровно с N пересадками нет —
+    не ждём до самого таймаута, а выходим через grace-окно (могло не быть в выдаче).
+    """
+    results_seen_at: Optional[float] = None
+    grace = 12  # сек на догрузку после появления первых результатов
+    while time.monotonic() < deadline:
+        tickets = page.evaluate(_EXTRACT_LIST_JS)
+        if tickets:
+            if results_seen_at is None:
+                results_seen_at = time.monotonic()
+            sel = _select_from_list(tickets, stops_wanted)
+            if sel:
+                return sel
+            if time.monotonic() - results_seen_at > grace:
+                return None
+        page.wait_for_timeout(2000)
+    return None

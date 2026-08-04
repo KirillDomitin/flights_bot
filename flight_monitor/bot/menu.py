@@ -27,7 +27,7 @@ from flight_monitor.sources import places
 logger = logging.getLogger(__name__)
 
 # Состояния мастера
-ORIGIN, DEST, DATE, TYPE, CONFIRM = range(5)
+ORIGIN, DEST, DATE, TYPE, STOPS, PASS, CONFIRM = range(7)
 
 _WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _MONTHS = {
@@ -97,9 +97,22 @@ async def menu_back(update, context) -> None:
     )
 
 
+def _stops_text(direct_only: bool, stops_wanted: int) -> str:
+    """Человекочитаемый тип рейса: 'прямой' или 'ровно 1 пересадка'."""
+    if direct_only:
+        return "прямой"
+    return f"ровно {notifier._stops_label(stops_wanted or 0)}"
+
+
 def _route_line(r: dict) -> str:
-    typ = "прямой" if r["direct_only"] else "с пересадками"
-    return f"{r['origin']}→{r['destination']} · {notifier.format_date_ru(r['depart_date'])} · {typ}"
+    line = (
+        f"{r['origin']}→{r['destination']} · {notifier.format_date_ru(r['depart_date'])}"
+        f" · {_stops_text(r['direct_only'], r.get('stops_wanted') or 0)}"
+    )
+    pax = notifier._passengers_label(r.get("passengers"))
+    if pax:
+        line += f" · {pax}"
+    return line
 
 
 def _routes_markup(routes: list[dict]) -> InlineKeyboardMarkup:
@@ -252,21 +265,71 @@ async def calendar_day(update, context) -> int:
     return TYPE
 
 
+def _wizard_summary(nr: dict) -> str:
+    """Сводка собираемого маршрута по человеческим названиям городов."""
+    line = (
+        f"{nr['origin_name']} → {nr['destination_name']}"
+        f" · {notifier.format_date_ru(nr['depart_date'])}"
+        f" · {_stops_text(nr.get('direct_only', True), nr.get('stops_wanted') or 0)}"
+    )
+    pax = notifier._passengers_label(nr.get("passengers"))
+    if pax:
+        line += f" · {pax}"
+    return line
+
+
+async def _ask_passengers(query, nr: dict) -> int:
+    """Спросить число пассажиров (взрослых) — общий шаг для обоих типов рейса."""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(str(n), callback_data=f"pax:{n}") for n in (1, 2, 3, 4)
+    ]])
+    await query.edit_message_text(
+        _wizard_summary(nr) + "\n\nСколько пассажиров (взрослых)?", reply_markup=kb
+    )
+    return PASS
+
+
 async def type_picked(update, context) -> int:
     query = update.callback_query
     await query.answer()
     direct = query.data.endswith(":direct")
     nr = context.user_data["new_route"]
     nr["direct_only"] = direct
+    if direct:
+        nr["stops_wanted"] = 0
+        return await _ask_passengers(query, nr)
+    # С пересадками → спрашиваем точное число пересадок
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"{n}", callback_data=f"stops:{n}") for n in (1, 2, 3)
+    ]])
+    await query.edit_message_text(
+        f"{nr['origin_name']} → {nr['destination_name']}"
+        f" · {notifier.format_date_ru(nr['depart_date'])}"
+        "\n\nСколько пересадок нужно? (будем искать рейсы ровно с таким числом)",
+        reply_markup=kb,
+    )
+    return STOPS
+
+
+async def stops_picked(update, context) -> int:
+    query = update.callback_query
+    await query.answer()
+    nr = context.user_data["new_route"]
+    nr["stops_wanted"] = int(query.data.split(":")[1])
+    return await _ask_passengers(query, nr)
+
+
+async def passengers_picked(update, context) -> int:
+    query = update.callback_query
+    await query.answer()
+    nr = context.user_data["new_route"]
+    nr["passengers"] = int(query.data.split(":")[1])
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Добавить", callback_data="add:confirm"),
         InlineKeyboardButton("❌ Отмена", callback_data="add:cancel"),
     ]])
     await query.edit_message_text(
-        f"{nr['origin']} → {nr['destination']} · {notifier.format_date_ru(nr['depart_date'])}"
-        f" · {'только прямой' if direct else 'можно с пересадками'}"
-        "\n\nДобавить в отслеживание?",
-        reply_markup=kb,
+        _wizard_summary(nr) + "\n\nДобавить в отслеживание?", reply_markup=kb
     )
     return CONFIRM
 
@@ -279,13 +342,10 @@ async def confirm_yes(update, context) -> int:
     added_by = (user.username or user.first_name) if user else None
     context.bot_data["config"]["db"].add_route(
         nr["origin"], nr["destination"], nr["depart_date"],
-        nr.get("direct_only", True), added_by=added_by,
+        nr.get("direct_only", True), nr.get("stops_wanted", 0),
+        nr.get("passengers", 1), added_by=added_by,
     )
-    typ = "прямой" if nr.get("direct_only", True) else "с пересадками"
-    await query.edit_message_text(
-        f"✅ Добавлено: {nr['origin']} → {nr['destination']} · "
-        f"{notifier.format_date_ru(nr['depart_date'])} · {typ}"
-    )
+    await query.edit_message_text("✅ Добавлено: " + _wizard_summary(nr))
     _clear(context)
     return ConversationHandler.END
 
@@ -324,6 +384,8 @@ def register(application) -> None:
                 CallbackQueryHandler(calendar_ignore, pattern="^cal:ignore$"),
             ],
             TYPE: [CallbackQueryHandler(type_picked, pattern="^type:")],
+            STOPS: [CallbackQueryHandler(stops_picked, pattern="^stops:")],
+            PASS: [CallbackQueryHandler(passengers_picked, pattern="^pax:")],
             CONFIRM: [
                 CallbackQueryHandler(confirm_yes, pattern="^add:confirm$"),
                 CallbackQueryHandler(cancel, pattern="^add:cancel$"),

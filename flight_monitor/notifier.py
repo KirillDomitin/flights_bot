@@ -78,6 +78,14 @@ def _format_change(price: int, previous: dict | None, currency: str | None) -> s
     return f"{arrow} {amount} {symbol}, {pct:+d}%".strip()
 
 
+def _passengers_label(passengers: int | None) -> str | None:
+    """2 -> '2 взрослых', 1/None -> None (одного пассажира не подписываем)."""
+    if not passengers or passengers <= 1:
+        return None
+    word = "взрослый" if passengers == 1 else "взрослых"
+    return f"{passengers} {word}"
+
+
 def _stops_label(stops: int | None) -> str | None:
     """0 -> 'прямой', 1 -> '1 пересадка', 2 -> '2 пересадки', 5 -> '5 пересадок'.
     None -> None (число пересадок неизвестно — подпись не показываем)."""
@@ -106,6 +114,9 @@ def build_message(record: dict, previous: dict | None) -> str:
     stops_label = _stops_label(record.get("stops"))
     if stops_label:
         price_line += f" · {stops_label}"
+    pax_label = _passengers_label(record.get("passengers"))
+    if pax_label:
+        price_line += f" · {pax_label}"
     if previous:
         old = previous["price"]
         diff_pct = round((price - old) / old * 100) if old else 0
@@ -138,6 +149,9 @@ def build_status_line(route: dict, record: dict | None, previous: dict | None = 
     stops_label = _stops_label(record.get("stops"))
     if stops_label:
         price_line += f" · {stops_label}"
+    pax_label = _passengers_label(record.get("passengers") or route.get("passengers"))
+    if pax_label:
+        price_line += f" · {pax_label}"
     change = _format_change(record["price"], previous, record.get("currency"))
     if change:
         price_line += f" ({change})"

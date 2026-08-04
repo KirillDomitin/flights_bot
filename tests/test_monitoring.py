@@ -15,7 +15,7 @@ from flight_monitor.bot import app as bot_app
 from flight_monitor.bot import menu
 from flight_monitor.core import monitoring
 from flight_monitor.repository import cache, storage
-from flight_monitor.sources import places
+from flight_monitor.sources import api, browser, places
 
 _CONFIG = {
     "travelpayouts_token": "test-token",
@@ -149,6 +149,19 @@ class MessageFormatTests(unittest.TestCase):
         self.assertNotIn("🔻", line)
         self.assertNotIn("без изменений", line)
 
+    def test_passengers_label(self) -> None:
+        self.assertIsNone(notifier._passengers_label(1))
+        self.assertIsNone(notifier._passengers_label(None))
+        self.assertEqual(notifier._passengers_label(2), "2 взрослых")
+        self.assertEqual(notifier._passengers_label(4), "4 взрослых")
+
+    def test_status_line_shows_passengers(self) -> None:
+        line = notifier.build_status_line(_ROUTE, dict(_record(27829), passengers=2))
+        self.assertIn("2 взрослых", line)
+        # одного пассажира не подписываем
+        solo = notifier.build_status_line(_ROUTE, dict(_record(27829), passengers=1))
+        self.assertNotIn("взросл", solo)
+
     def test_stops_label_pluralization(self) -> None:
         self.assertEqual(notifier._stops_label(0), "прямой")
         self.assertEqual(notifier._stops_label(1), "1 пересадка")
@@ -165,17 +178,17 @@ class MessageFormatTests(unittest.TestCase):
 
 
 class CacheTests(unittest.TestCase):
-    def test_price_key_includes_source_mode_and_route(self) -> None:
-        # _ROUTE без direct_only → по умолчанию прямой (mode=d)
+    def test_price_key_includes_stops_and_passengers(self) -> None:
+        # _ROUTE без stops_wanted/passengers → s0 (прямой), p1
         self.assertEqual(
             cache.price_key("browser", _ROUTE),
-            "price:browser:d:MOW:PEK:2025-09-22",
+            "price:browser:MOW:PEK:2025-09-22:s0:p1",
         )
-        # с пересадками → mode=c, ключ отличается
-        route_c = dict(_ROUTE, direct_only=False)
+        # ровно 1 пересадка и 2 пассажира → другой ключ
+        route2 = dict(_ROUTE, direct_only=False, stops_wanted=1, passengers=2)
         self.assertEqual(
-            cache.price_key("browser", route_c),
-            "price:browser:c:MOW:PEK:2025-09-22",
+            cache.price_key("browser", route2),
+            "price:browser:MOW:PEK:2025-09-22:s1:p2",
         )
 
     def test_memory_cache_hit_and_miss(self) -> None:
@@ -270,6 +283,21 @@ class RoutesTests(unittest.TestCase):
         # повторное удаление уже неактивного → False
         self.assertFalse(self.repo.remove_route(rid))
 
+    def test_add_route_stores_stops_and_passengers(self) -> None:
+        self.repo.add_route("MOW", "IST", "2026-10-01", direct_only=False, stops_wanted=2, passengers=3)
+        r = self.repo.get_active_routes()[0]
+        self.assertFalse(r["direct_only"])
+        self.assertEqual(r["stops_wanted"], 2)
+        self.assertEqual(r["passengers"], 3)
+
+    def test_readd_updates_stops_and_passengers(self) -> None:
+        rid = self.repo.add_route("MOW", "IST", "2026-10-01", direct_only=False, stops_wanted=1, passengers=1)
+        rid2 = self.repo.add_route("MOW", "IST", "2026-10-01", direct_only=False, stops_wanted=2, passengers=4)
+        self.assertEqual(rid, rid2)  # тот же маршрут (UNIQUE), обновлён
+        r = self.repo.get_active_routes()[0]
+        self.assertEqual(r["stops_wanted"], 2)
+        self.assertEqual(r["passengers"], 4)
+
     def test_add_duplicate_reactivates(self) -> None:
         rid = self.repo.add_route("LED", "AER", "2026-10-01", direct_only=True)
         self.repo.remove_route(rid)
@@ -312,6 +340,56 @@ class PlacesTests(unittest.TestCase):
             places.label({"code": "PEK", "name": "Пекин", "country": "Китай"}),
             "Пекин, Китай (PEK)",
         )
+
+
+class BrowserSelectTests(unittest.TestCase):
+    def test_select_from_list_picks_cheapest_with_exact_stops(self) -> None:
+        tickets = [
+            {"price": 15000, "stops": 0},
+            {"price": 12000, "stops": 2},
+            {"price": 18000, "stops": 1},
+            {"price": 16000, "stops": 1},  # самый дешёвый ровно с 1 пересадкой
+        ]
+        best = browser._select_from_list(tickets, 1)
+        self.assertEqual(best["price"], 16000)
+
+    def test_select_from_list_none_when_no_exact_match(self) -> None:
+        tickets = [{"price": 12000, "stops": 0}, {"price": 15000, "stops": 2}]
+        self.assertIsNone(browser._select_from_list(tickets, 1))
+
+    def test_build_search_url_encodes_passengers(self) -> None:
+        self.assertTrue(browser.build_search_url("MOW", "PEK", "2026-09-22", 3).endswith("PEK3"))
+        self.assertTrue(browser.build_search_url("MOW", "PEK", "2026-09-22").endswith("PEK1"))
+
+
+class ApiExactStopsTests(unittest.TestCase):
+    def _payload(self) -> dict:
+        return {
+            "success": True,
+            "currency": "rub",
+            "data": {"PEK": {
+                "0": {"price": 20000, "number_of_changes": 0, "airline": "SU"},
+                "1": {"price": 15000, "number_of_changes": 1, "airline": "CA"},
+                "2": {"price": 12000, "number_of_changes": 2, "airline": "MU"},
+            }},
+        }
+
+    def test_exact_one_stop_selected(self) -> None:
+        with mock.patch.object(api.httpx, "get", return_value=_FakeResp(self._payload())):
+            rec = api.fetch_price(
+                "t", "MOW", "PEK", "2025-09-22",
+                direct_only=False, stops_wanted=1, passengers=2,
+            )
+        self.assertEqual(rec["price"], 15000)   # не самый дешёвый (12000/2 пересадки), а ровно 1
+        self.assertEqual(rec["stops"], 1)
+        self.assertEqual(rec["passengers"], 2)
+
+    def test_none_when_no_offer_with_wanted_stops(self) -> None:
+        payload = {"success": True, "currency": "rub",
+                   "data": {"PEK": {"0": {"price": 20000, "number_of_changes": 0}}}}
+        with mock.patch.object(api.httpx, "get", return_value=_FakeResp(payload)):
+            rec = api.fetch_price("t", "MOW", "PEK", "2025-09-22", direct_only=False, stops_wanted=1)
+        self.assertIsNone(rec)
 
 
 class CalendarTests(unittest.TestCase):
@@ -366,6 +444,24 @@ class WebhookConfigTests(unittest.TestCase):
         self.assertEqual(
             bot_app._webhook_path("https://flights.example.com/"), ""
         )
+
+
+class MenuFormatTests(unittest.TestCase):
+    def test_route_line_direct(self) -> None:
+        line = menu._route_line({
+            "origin": "MOW", "destination": "PEK", "depart_date": "2026-09-22",
+            "direct_only": True, "stops_wanted": 0, "passengers": 1,
+        })
+        self.assertIn("прямой", line)
+        self.assertNotIn("взросл", line)  # 1 пассажир не подписываем
+
+    def test_route_line_with_stops_and_passengers(self) -> None:
+        line = menu._route_line({
+            "origin": "MOW", "destination": "IST", "depart_date": "2026-10-01",
+            "direct_only": False, "stops_wanted": 1, "passengers": 2,
+        })
+        self.assertIn("ровно 1 пересадка", line)
+        self.assertIn("2 взрослых", line)
 
 
 class ChartTests(unittest.TestCase):
