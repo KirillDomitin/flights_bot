@@ -49,8 +49,10 @@ def run_bot(config: dict) -> None:
     else:
         for hour in CHECK_HOURS:
             application.job_queue.run_daily(handlers.job_monitor, time=dtm.time(hour=hour, minute=0))
-        times = ", ".join(f"{h:02d}:00" for h in CHECK_HOURS)
-        logger.info("Плановые проверки включены: %s (Europe/Moscow).", times)
+        logger.info(
+            "Плановые проверки включены: %d раз/сутки в :00 (Europe/Moscow).",
+            len(CHECK_HOURS),
+        )
 
     if config.get("bot_mode") == "webhook":
         path = _webhook_path(config["webhook_url"])

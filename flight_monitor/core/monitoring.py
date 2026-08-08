@@ -174,8 +174,10 @@ def run_scheduler(config: dict) -> None:
     """Запустить блокирующий планировщик (4 раза в сутки, см. CHECK_HOURS)."""
     for hour in CHECK_HOURS:
         schedule.every().day.at(f"{hour:02d}:00").do(run_check, config=config)
-    times = ", ".join(f"{h:02d}:00" for h in CHECK_HOURS)
-    logger.info("Планировщик запущен: проверки в %s. Ctrl+C для выхода.", times)
+    logger.info(
+        "Планировщик запущен: %d проверок/сутки в :00. Ctrl+C для выхода.",
+        len(CHECK_HOURS),
+    )
 
     # Первичная проверка сразу при старте
     run_check(config)
